@@ -1,0 +1,9 @@
+# 运行产物
+*.log
+*_original
+问题文件清单*.csv
+
+# 构建中间产物
+launcher.exe
+*.o
+__pycache__/
