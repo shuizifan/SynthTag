@@ -7,10 +7,23 @@
 ## 功能
 
 - 拖入文件或文件夹（递归子目录），批量写入合规标签
+- **加入即检测**：列表直接标出标签状态，已有标签的文件划删除线置灰，主按钮实时显示待处理数量
 - 写入前查重自动跳过，写入后立即回读验证，重复标签自动归一
 - 体检扫描：区分 已打标签 / 未打标签 / 重复 / 读取失败
 - 支持移除标签、导出问题清单 CSV
 - 本地离线运行，不联网、不上传；中文/空格路径无压力
+
+### 列表操作
+
+| 操作 | 说明 |
+|---|---|
+| `Delete` / `Backspace` | 把选中项移出列表（不动文件本身） |
+| `Ctrl + V` | 粘贴添加：支持资源管理器里复制的文件/文件夹，或直接粘贴路径文本（可多行） |
+| `Ctrl + A` | 全选 |
+| `F5` | 重新检测标签状态 |
+| 双击 | 在资源管理器中定位该文件 |
+| 右键 | 打开所在文件夹 / 复制路径 / 移除选中 / 仅保留选中 |
+| 点列头 | 按文件名、类型、状态、文件夹排序 |
 
 支持格式：jpg / jpeg / png / tif / tiff / webp / mp4 / mov / m4v / 3gp
 
@@ -31,10 +44,14 @@
 依赖：[Zig](https://ziglang.org/)（交叉编译启动器）+ Python 3。
 
 ```bash
-# 1. 编译启动器 (任意平台均可交叉编译出 Windows exe)
-zig cc -target x86_64-windows-gnu -O2 -s -Wl,--subsystem,windows -o launcher.exe build/launcher.c
+# 1. 编译图标资源
+zig rc build/app.rc build/app.res
 
-# 2. 打包: launcher + app.ps1 + exiftool_bin -> 单文件 exe
+# 2. 编译启动器 (任意平台均可交叉编译出 Windows exe)
+zig cc -target x86_64-windows-gnu -O2 -s -Wl,--subsystem,windows \
+  -o launcher.exe build/launcher.c build/app.res
+
+# 3. 打包: launcher + app.ps1 + 图标 + exiftool_bin -> 单文件 exe
 python3 build/make_payload.py launcher.exe SynthTag.exe .
 ```
 
@@ -45,9 +62,13 @@ SynthTag.exe        单文件版（launcher + app.ps1 + ExifTool 自解压包）
 app.ps1             主程序（PowerShell + WinForms 图形界面）
 start.bat           文件夹版启动入口
 exiftool_bin/       内置 ExifTool（亚马逊官方指南推荐的元数据引擎）
+assets/             图标源文件（icon.svg + 多尺寸 ICO）
 build/launcher.c    自解压启动器源码（C）
+build/app.rc        图标资源脚本
 build/make_payload.py  打包脚本
 ```
+
+图标基于 [Lucide](https://lucide.dev)（ISC License）的 tag / sparkle 图形二次设计。
 
 ## 技术说明
 

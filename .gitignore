@@ -7,3 +7,4 @@
 launcher.exe
 *.o
 __pycache__/
+*.res

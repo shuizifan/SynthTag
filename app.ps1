@@ -8,6 +8,23 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# ---------------- 任务栏身份 ----------------
+# 宿主进程是 powershell.exe，若不显式声明 AppUserModelID，
+# 任务栏会沿用 PowerShell 的图标。必须在创建任何窗口之前调用。
+try {
+    Add-Type -Namespace SynthTag -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int SetCurrentProcessExplicitAppUserModelID(string AppID);
+
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+public static extern System.IntPtr SendMessage(System.IntPtr hWnd, int Msg, System.IntPtr wParam, System.IntPtr lParam);
+'@ -ErrorAction Stop
+    $null = [SynthTag.Native]::SetCurrentProcessExplicitAppUserModelID('Vincent.SynthTag')
+    $script:HasNative = $true
+} catch {
+    $script:HasNative = $false   # 无 C# 编译器时降级，不影响功能
+}
+
 # ---------------- 常量 ----------------
 $TAG  = 'contains-synthetic-performer'
 $EXTS = @('.jpg','.jpeg','.png','.tif','.tiff','.webp','.mp4','.mov','.m4v','.3gp')
@@ -89,9 +106,30 @@ $form.MinimumSize = New-Object Drawing.Size(720, 500)
 $form.StartPosition = 'CenterScreen'
 $form.Font = New-Object Drawing.Font('Microsoft YaHei UI', 9)
 $form.AllowDrop = $true
+# 窗口/任务栏图标（单文件版解压到同目录，文件夹版在 assets\ 下）
+$script:AppIcon = $null
+foreach ($p in @((Join-Path $ScriptDir 'SynthTag.ico'), (Join-Path $ScriptDir 'assets\SynthTag.ico'))) {
+    if (Test-Path -LiteralPath $p) {
+        try {
+            $script:AppIcon = New-Object Drawing.Icon($p)
+            $form.Icon = $script:AppIcon
+        } catch { }
+        break
+    }
+}
+# 窗口句柄创建后再显式发一次 WM_SETICON，确保任务栏拿到大小两种图标
+$form.Add_Shown({
+    if ($script:HasNative -and $script:AppIcon) {
+        try {
+            $h = $script:AppIcon.Handle
+            $null = [SynthTag.Native]::SendMessage($form.Handle, 0x0080, [IntPtr]1, $h)  # ICON_BIG
+            $null = [SynthTag.Native]::SendMessage($form.Handle, 0x0080, [IntPtr]0, $h)  # ICON_SMALL
+        } catch { }
+    }
+})
 
 $lblHint = New-Object Windows.Forms.Label
-$lblHint.Text = '把图片/视频文件或整个文件夹拖到窗口内即可（子目录会自动递归）'
+$lblHint.Text = '拖入文件/文件夹，或按 Ctrl+V 粘贴路径（子目录自动递归；选中后按 Delete 移出列表）'
 $lblHint.ForeColor = [Drawing.Color]::DimGray
 $lblHint.Location = New-Object Drawing.Point(12, 10)
 $lblHint.AutoSize = $true
@@ -114,13 +152,28 @@ $list = New-Object Windows.Forms.ListView
 $list.View = 'Details'
 $list.FullRowSelect = $true
 $list.GridLines = $true
+$list.HideSelection = $false
+$list.ShowItemToolTips = $true
 $list.Location = New-Object Drawing.Point(12, 70)
 $list.Size = New-Object Drawing.Size(860, 420)
 $list.Anchor = 'Top,Bottom,Left,Right'
-$null = $list.Columns.Add('文件路径', 600)
-$null = $list.Columns.Add('类型', 60)
-$null = $list.Columns.Add('状态', 140)
+$null = $list.Columns.Add('文件名', 260)
+$null = $list.Columns.Add('类型', 55)
+$null = $list.Columns.Add('状态', 120)
+$null = $list.Columns.Add('所在文件夹', 400)
 $list.AllowDrop = $true
+
+# 右键菜单（借鉴文件管理类软件的常用操作）
+$menu = New-Object Windows.Forms.ContextMenuStrip
+$miOpenFolder = $menu.Items.Add('打开所在文件夹')
+$miCopyPath   = $menu.Items.Add('复制完整路径')
+$null = $menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+$miRemoveSel  = $menu.Items.Add('从列表移除选中项   Delete')
+$miKeepSel    = $menu.Items.Add('仅保留选中项')
+$null = $menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
+$miPaste      = $menu.Items.Add('粘贴路径添加   Ctrl+V')
+$miSelectAll  = $menu.Items.Add('全选   Ctrl+A')
+$list.ContextMenuStrip = $menu
 
 # 主操作按钮（强调）
 $btnAdd = New-Object Windows.Forms.Button
@@ -166,6 +219,11 @@ $form.Controls.AddRange(@($lblHint,$btnFiles,$btnFolder,$btnClear,$chkBackup,
 # ---------------- 列表管理 ----------------
 $script:Items = @{}   # 小写全路径 -> ListViewItem
 $script:Busy = $false
+$script:OpDone = $false
+$script:CountSummary = ''
+# 共享字体对象（避免每行新建 Font 占用 GDI 资源）
+$script:FontNormal = $list.Font
+$script:FontStrike = New-Object Drawing.Font($list.Font, [Drawing.FontStyle]::Strikeout)
 
 function Add-Paths([string[]]$paths) {
     if ($script:Busy) { return }
@@ -188,33 +246,130 @@ function Add-Paths([string[]]$paths) {
         }
     }
     $added = 0
+    $newFiles = New-Object Collections.Generic.List[string]
     $list.BeginUpdate()
     foreach ($f in $files) {
         $key = $f.ToLower()
         if (-not $script:Items.ContainsKey($key)) {
             $ext = [IO.Path]::GetExtension($f).ToLower()
             $type = if ($VIDEO_EXTS -contains $ext) { '视频' } else { '图片' }
-            $it = New-Object Windows.Forms.ListViewItem($f)
+            $it = New-Object Windows.Forms.ListViewItem([IO.Path]::GetFileName($f))
             $null = $it.SubItems.Add($type)
             $null = $it.SubItems.Add($STATUS_TEXT.pending)
+            $null = $it.SubItems.Add([IO.Path]::GetDirectoryName($f))
             $it.Tag = $f
+            $it.ToolTipText = $f
             $null = $list.Items.Add($it)
             $script:Items[$key] = $it
+            $newFiles.Add($f)
             $added++
         }
     }
     $list.EndUpdate()
-    $lblStatus.Text = "已加入 $added 个文件，共 $($list.Items.Count) 个。"
+    $lblStatus.Text = "已加入 $added 个文件，共 $($list.Items.Count) 个。正在检查标签状态…"
+    Update-Counts
+    [Windows.Forms.Application]::DoEvents()
+    # 加入后立即回读一次, 让用户马上看到哪些已有标签(划删除线)
+    if ($newFiles.Count -gt 0) { Update-TagStatus $newFiles }
+}
+
+function Update-TagStatus([string[]]$files) {
+    # 只读不改: 标出 已打标签 / 未打标签 / 重复 / 读取失败
+    if ($script:Busy -or $files.Count -eq 0) { return }
+    $script:Busy = $true; Set-Buttons $false
+    try {
+        $subjMap = Get-Subjects $files
+        $list.BeginUpdate()
+        foreach ($f in $files) {
+            $subj = $null
+            if ($subjMap.ContainsKey($f.ToLower())) { $subj = $subjMap[$f.ToLower()] }
+            Set-ItemStatus $f (Get-FileState $subj)
+        }
+        $list.EndUpdate()
+    } catch {
+        $lblStatus.Text = "标签状态检查失败: $($_.Exception.Message)"
+        return
+    } finally {
+        $script:Busy = $false; Set-Buttons $true
+    }
+    Update-Counts
+    $lblStatus.Text = "$script:CountSummary（划删除线 = 已有标签，无需处理）"
 }
 
 function Set-ItemStatus([string]$file, [string]$state) {
     $it = $script:Items[$file.ToLower()]
-    if ($it) {
-        $it.SubItems[2].Text = $STATUS_TEXT[$state]
-        if ($PROBLEM -contains $state) { $it.ForeColor = [Drawing.Color]::Firebrick }
-        elseif ($state -in @('added','tagged','fixed_duplicate','removed')) { $it.ForeColor = [Drawing.Color]::ForestGreen }
-        else { $it.ForeColor = [Drawing.Color]::Black }
+    if (-not $it) { return }
+    $it.SubItems[2].Text = $STATUS_TEXT[$state]
+    # 已有标签的文件: 划删除线 + 灰色, 一眼看出本次无需处理
+    $done = @('tagged','added','fixed_duplicate','skipped')
+    if ($state -in $done) { $it.Font = $script:FontStrike } else { $it.Font = $script:FontNormal }
+    if ($PROBLEM -contains $state -and $state -ne 'untagged') {
+        $it.ForeColor = [Drawing.Color]::Firebrick
+    } elseif ($state -eq 'untagged') {
+        $it.ForeColor = [Drawing.Color]::FromArgb(0, 90, 158)   # 待处理: 蓝色, 是本次要动的
+    } elseif ($state -in @('added','fixed_duplicate','removed')) {
+        $it.ForeColor = [Drawing.Color]::ForestGreen
+    } else {
+        $it.ForeColor = [Drawing.Color]::Gray                    # 已打标签/跳过: 灰
     }
+}
+
+function Get-ItemState($it) {
+    $txt = $it.SubItems[2].Text
+    foreach ($k in $STATUS_TEXT.Keys) { if ($STATUS_TEXT[$k] -eq $txt) { return $k } }
+    return 'pending'
+}
+
+function Update-Counts {
+    # 主按钮上实时显示"本次真正会被写入的数量"
+    $total = $list.Items.Count
+    $todo = 0; $tagged = 0; $bad = 0
+    foreach ($it in $list.Items) {
+        switch (Get-ItemState $it) {
+            'untagged'  { $todo++ }
+            'duplicate' { $todo++ }
+            'pending'   { $todo++ }
+            'tagged'    { $tagged++ }
+            'added'     { $tagged++ }
+            'fixed_duplicate' { $tagged++ }
+            'skipped'   { $tagged++ }
+            'unreadable' { $bad++ }
+            'failed'    { $bad++ }
+        }
+    }
+    $btnAdd.Text = if ($todo -gt 0) { "开始添加标签 ($todo)" } else { '开始添加标签' }
+    $btnAdd.Enabled = ($todo -gt 0) -and (-not $script:Busy)
+    $script:CountSummary = "共 $total 个 — 待打标签 $todo，已有标签 $tagged" + $(if ($bad) { "，异常 $bad" } else { '' })
+}
+
+function Add-FromClipboard {
+    # 支持两种粘贴: 1) 在资源管理器里 Ctrl+C 复制的文件/文件夹  2) 纯文本路径(可多行)
+    if ($script:Busy) { return }
+    $paths = @()
+    try {
+        if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
+            $paths = @([Windows.Forms.Clipboard]::GetFileDropList())
+        } elseif ([Windows.Forms.Clipboard]::ContainsText()) {
+            $paths = @([Windows.Forms.Clipboard]::GetText() -split "`r?`n" |
+                       ForEach-Object { $_.Trim().Trim('"') } |
+                       Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+        }
+    } catch { }
+    if ($paths.Count -gt 0) { Add-Paths $paths }
+    else { $lblStatus.Text = '剪贴板里没有可用的文件或文件夹路径。' }
+}
+
+function Remove-Selected {
+    if ($script:Busy -or $list.SelectedItems.Count -eq 0) { return }
+    $n = $list.SelectedItems.Count
+    $list.BeginUpdate()
+    foreach ($it in @($list.SelectedItems)) {
+        $script:Items.Remove(([string]$it.Tag).ToLower())
+        $list.Items.Remove($it)
+    }
+    $list.EndUpdate()
+    Update-Counts
+    $lblStatus.Text = "已从列表移除 $n 个（文件本身未改动）。$script:CountSummary"
 }
 
 # ---------------- 拖拽 ----------------
@@ -222,6 +377,79 @@ $dragEnter = { param($s,$e) if ($e.Data.GetDataPresent([Windows.Forms.DataFormat
 $dragDrop  = { param($s,$e) Add-Paths ($e.Data.GetData([Windows.Forms.DataFormats]::FileDrop)) }
 $form.Add_DragEnter($dragEnter); $form.Add_DragDrop($dragDrop)
 $list.Add_DragEnter($dragEnter); $list.Add_DragDrop($dragDrop)
+
+# ---------------- 键盘快捷键 ----------------
+$list.Add_KeyDown({
+    param($s,$e)
+    if ($e.KeyCode -eq 'Delete' -or $e.KeyCode -eq 'Back') {
+        Remove-Selected
+        $e.Handled = $true; $e.SuppressKeyPress = $true    # 屏蔽退格键的系统提示音
+    } elseif ($e.Control -and $e.KeyCode -eq 'A') {
+        foreach ($it in $list.Items) { $it.Selected = $true }
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+    } elseif ($e.Control -and $e.KeyCode -eq 'V') {
+        Add-FromClipboard
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+    } elseif ($e.KeyCode -eq 'F5') {
+        Update-TagStatus (Get-AllFiles)
+        $e.Handled = $true; $e.SuppressKeyPress = $true
+    }
+})
+
+# 双击打开所在文件夹并选中该文件
+function Open-InExplorer($it) {
+    if ($it) { Start-Process explorer.exe -ArgumentList "/select,`"$($it.Tag)`"" }
+}
+$list.Add_DoubleClick({ Open-InExplorer $list.FocusedItem })
+
+# ---------------- 右键菜单 ----------------
+$miOpenFolder.Add_Click({ Open-InExplorer $list.FocusedItem })
+$miCopyPath.Add_Click({
+    if ($list.SelectedItems.Count -gt 0) {
+        $txt = (@($list.SelectedItems | ForEach-Object { $_.Tag }) -join "`r`n")
+        [Windows.Forms.Clipboard]::SetText($txt)
+        $lblStatus.Text = "已复制 $($list.SelectedItems.Count) 个路径到剪贴板。"
+    }
+})
+$miRemoveSel.Add_Click({ Remove-Selected })
+$miKeepSel.Add_Click({
+    if ($script:Busy -or $list.SelectedItems.Count -eq 0) { return }
+    $keep = @{}
+    foreach ($it in $list.SelectedItems) { $keep[([string]$it.Tag).ToLower()] = $true }
+    $list.BeginUpdate()
+    foreach ($it in @($list.Items)) {
+        if (-not $keep.ContainsKey(([string]$it.Tag).ToLower())) {
+            $script:Items.Remove(([string]$it.Tag).ToLower())
+            $list.Items.Remove($it)
+        }
+    }
+    $list.EndUpdate()
+    Update-Counts
+    $lblStatus.Text = "已保留选中的 $($list.Items.Count) 个。$script:CountSummary"
+})
+$miPaste.Add_Click({ Add-FromClipboard })
+$miSelectAll.Add_Click({ foreach ($it in $list.Items) { $it.Selected = $true } })
+$menu.Add_Opening({
+    $has = $list.SelectedItems.Count -gt 0
+    $miOpenFolder.Enabled = $has; $miCopyPath.Enabled = $has
+    $miRemoveSel.Enabled = $has -and (-not $script:Busy)
+    $miKeepSel.Enabled = $has -and (-not $script:Busy)
+})
+
+# ---------------- 点列头排序 ----------------
+$script:SortCol = -1
+$script:SortAsc = $true
+$list.Add_ColumnClick({
+    param($s,$e)
+    if ($script:SortCol -eq $e.Column) { $script:SortAsc = -not $script:SortAsc }
+    else { $script:SortCol = $e.Column; $script:SortAsc = $true }
+    $col = $e.Column; $asc = $script:SortAsc
+    $rows = @($list.Items) | Sort-Object -Property @{Expression={ $_.SubItems[$col].Text }} -Descending:(-not $asc)
+    $list.BeginUpdate()
+    $list.Items.Clear()
+    foreach ($r in $rows) { $null = $list.Items.Add($r) }
+    $list.EndUpdate()
+})
 
 # ---------------- 按钮：加文件 ----------------
 $btnFiles.Add_Click({
@@ -232,11 +460,31 @@ $btnFiles.Add_Click({
     if ($dlg.ShowDialog() -eq 'OK') { Add-Paths $dlg.FileNames }
 })
 $btnFolder.Add_Click({
-    $dlg = New-Object Windows.Forms.FolderBrowserDialog
-    if ($dlg.ShowDialog() -eq 'OK') { Add-Paths @($dlg.SelectedPath) }
+    # 用现代版「打开」对话框选文件夹: 带地址栏、可直接输入/粘贴完整路径
+    # (WinForms 自带的 FolderBrowserDialog 是老式树形控件, 不能输入路径)
+    $dlg = New-Object Windows.Forms.OpenFileDialog
+    $dlg.Title = '进入目标文件夹后点「打开」即可（可在地址栏或文件名框直接粘贴路径）'
+    $dlg.ValidateNames = $false
+    $dlg.CheckFileExists = $false
+    $dlg.CheckPathExists = $true
+    $dlg.FileName = '选择此文件夹'
+    $dlg.Filter = '文件夹|*.__folder__'
+    if ($dlg.ShowDialog() -eq 'OK') {
+        $p = $dlg.FileName
+        # 若用户直接选中/输入的就是一个已存在的文件夹, 用它; 否则取所在目录
+        if (Test-Path -LiteralPath $p -PathType Container) { Add-Paths @($p) }
+        else {
+            $dir = [IO.Path]::GetDirectoryName($p)
+            if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) { Add-Paths @($dir) }
+        }
+    }
 })
 $btnClear.Add_Click({
-    if (-not $script:Busy) { $list.Items.Clear(); $script:Items = @{}; $lblStatus.Text = '列表已清空。' }
+    if (-not $script:Busy) {
+        $list.Items.Clear(); $script:Items = @{}
+        Update-Counts
+        $lblStatus.Text = '列表已清空。'
+    }
 })
 
 # ---------------- 核心操作 ----------------
@@ -276,8 +524,15 @@ function Run-Action([string]$action) {
         return
     }
     if ($action -eq 'add') {
+        # 列表里已标出状态: 只对真正需要处理的文件弹确认, 全部已打标签则直接提示不打扰
+        $pending = @($list.Items | Where-Object { (Get-ItemState $_) -notin @('tagged','added','fixed_duplicate','skipped') })
+        if ($pending.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show(
+                "列表中的文件都已含标签，无需重复写入。",'无需处理','OK','Information') | Out-Null
+            return
+        }
         $r = [Windows.Forms.MessageBox]::Show(
-            "将为 $($files.Count) 个文件写入标签：`n$TAG`n`n已含标签的文件会自动跳过。是否继续？",
+            "将为 $($pending.Count) 个文件写入标签：`n$TAG`n`n已含标签的文件会自动跳过。是否继续？",
             '确认','OKCancel','Question')
         if ($r -ne 'OK') { return }
     }
@@ -371,6 +626,7 @@ function Run-Action([string]$action) {
         $lblStatus.Text = $errDetail
     } finally {
         $script:Busy = $false; Set-Buttons $true
+        Update-Counts
         $script:OpDone = $true   # 下次添加文件时自动清空列表
     }
 }

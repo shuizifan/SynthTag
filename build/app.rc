@@ -1,0 +1,4 @@
+// SynthTag 应用图标资源
+// 编译: zig rc build/app.rc build/app.res
+// 然后作为输入传给 zig cc 一起链接进 exe
+1 ICON "../assets/SynthTag.ico"

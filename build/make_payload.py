@@ -13,6 +13,9 @@ def build_payload(src_dir):
     entries = []
     # app.ps1 在根, exiftool_bin 整体保留结构
     targets = [("app.ps1", os.path.join(src_dir, "app.ps1"))]
+    ico = os.path.join(src_dir, "assets", "SynthTag.ico")
+    if os.path.isfile(ico):
+        targets.append(("SynthTag.ico", ico))   # 供窗口/任务栏图标使用
     et = os.path.join(src_dir, "exiftool_bin")
     for root, _dirs, files in os.walk(et):
         for f in sorted(files):
