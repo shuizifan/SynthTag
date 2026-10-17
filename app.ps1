@@ -226,6 +226,47 @@ function Get-LogicalState($it) {
     return $state
 }
 
+function Get-FriendlyFileDetail($item,[string]$reason) {
+    $state=Get-ItemState $item
+    $logical=Get-LogicalState $item
+    if ($state -in @('unreadable','failed')) {
+        if ($reason -match '\bFile (?:is )?empty\b|空文件|文件为空|没有内容') {
+            $text="文件没有内容，本次已跳过。`r`n请重新复制或导出这张图片。"
+        } elseif ($reason -match 'truncat|corrupt|checksum|CRC|截断|损坏|完整性') {
+            $text="文件内容可能不完整，本次未完成。`r`n请保留原文件，重新复制一份后再试。"
+        } elseif ($reason -match 'sharing violation|being used|占用|另一.*进程') {
+            $text="文件正被其他程序使用，本次未完成。`r`n关闭图片编辑器或预览窗口后再试。"
+        } elseif ($reason -match 'access.*denied|permission|read.only|拒绝访问|权限|只读') {
+            $text="权限不足，无法处理这个文件。`r`n请检查文件是否只读，或联系文件夹管理员。"
+        } elseif ($reason -match 'network|connection|timed? ?out|网络|断开|超时|连接失败') {
+            $text="文件读取超时，或所在位置暂时无法访问。`r`n请确认文件所在位置可以正常打开后再试。"
+        } elseif ($state -eq 'unreadable' -and $reason -match 'Non-standard IFD|Entries in IFD|out of sequence|Missing required JPEG|Odd offset for|not allowed in JPEG|Multiple IPTC|元数据') {
+            $text="图片附带信息不规范，本次已跳过打标签。`r`n可用图片编辑软件另存一份副本后再试。"
+        } else {
+            $text="这个文件暂时无法完成检查或处理。`r`n请确认文件能正常打开；仍有问题可在设置中导出诊断包。"
+        }
+    } elseif ($state -eq 'warning') {
+        $action=switch ($logical) { 'removed' { '标签已移除' } 'fixed_duplicate' { '重复标签已整理' } default { '标签已添加' } }
+        $text=$action+"，但处理过程中有提醒。`r`n如需排查，请在设置中导出诊断包。"
+        if ($reason -match '清理|未能删除|cleanup|delete.*backup') { $text=$action+'，但备份副本未能清理，请先保留副本。' }
+    } else {
+        $text=switch ($state) {
+            'added' { '标签已添加，并通过写入后检查。' }
+            'fixed_duplicate' { '重复标签已整理，并通过写入后检查。' }
+            'removed' { '标签已移除，并通过写入后检查。' }
+            'duplicate' { '标签有重复，点击“开始添加标签”即可整理。' }
+            { $_ -in @('tagged','skipped') } { '这个文件已有标签，无需重复添加。' }
+            'untagged' { '这个文件还没有标签，可以点击“开始添加标签”。' }
+            'pending' { '正在检查这个文件的标签，请稍候。' }
+            default { '请在设置中导出诊断包，交给维护人员排查。' }
+        }
+    }
+    if ($reason -match '恢复副本（请勿删除）：([^\r\n]+)') {
+        $text="本次处理未完成，已保留恢复副本。请先联系维护人员核对，不要删除副本或重复处理。`r`n恢复副本："+$Matches[1]
+    }
+    return $text
+}
+
 function Update-FileDetails {
     if ($list.SelectedItems.Count -eq 0) {
         $ui.DetailTitle.Text='文件详情'
@@ -243,14 +284,11 @@ function Update-FileDetails {
     $reason=$script:LastFileErrors[$key]
     if (-not $reason) { $reason=$script:LastFileWarnings[$key] }
     $ui.DetailTitle.Text=$item.Text+'  ·  '+$item.SubItems[2].Text
-    $explanation=''
-    if ((Get-ItemState $item) -eq 'unreadable') {
-        $explanation="文件读取或标签校验未通过，已停止写入；这不代表缩略图加载失败，也不能仅据此认定图片损坏。"
-    }
+    $explanation=Get-FriendlyFileDetail $item $reason
     if ($list.GetThumbnailState([string]$item.Tag) -eq 'failed') {
-        $explanation += $(if ($explanation) { "`r`n" } else { '' })+'缩略图暂不可用，预览与标签检查分别处理；预览原因已记入日志。'
+        $explanation += "`r`n预览暂时无法显示。"
     }
-    $ui.DetailBody.Text=[string]$item.Tag+$(if ($explanation) { "`r`n"+$explanation } else { '' })+$(if ($reason) { "`r`n技术信息："+$reason } else { '' })
+    $ui.DetailBody.Text=$explanation+"`r`n文件位置："+[string]$item.Tag
     $ui.CopyDetails.Enabled=$true
 }
 

@@ -223,7 +223,7 @@ while ($null -ne ($line=[Console]::ReadLine())) {
         Assert ($timeoutRow.ToolTipText -eq $originalTooltip) 'Preview timeout mutated the disabled row tooltip.'
         $list.SelectedItems.Clear(); $timeoutRow.Selected=$true; $timeoutRow.Focused=$true
         [Windows.Forms.Application]::DoEvents()
-        Assert ($ui.DetailBody.Text.Contains('原标签诊断必须保留') -and $ui.DetailBody.Text.Contains('缩略图暂不可用')) 'Preview timeout details omit the original tag diagnostic or independent preview explanation.'
+        Assert ($script:LastFileWarnings[$timeoutPath.ToLowerInvariant()] -eq '原标签诊断必须保留' -and $ui.DetailBody.Text.Contains('预览暂时无法显示') -and -not $ui.DetailBody.Text.Contains('原标签诊断必须保留')) 'Preview details must stay readable while retaining original diagnostics separately.'
         $logRecords=@(Get-ChildItem -LiteralPath $script:LogDirectory -Filter '*.jsonl' | Get-Content -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json })
         Assert (@($logRecords | Where-Object { $_.level -eq 'WARNING' -and $_.message -eq 'Thumbnail unavailable' -and $_.data.reason -match '8|超时' }).Count -gt 0) 'Preview timeout did not reach the application WARNING log.'
         $list.ThumbnailWorkerScript=$realWorker

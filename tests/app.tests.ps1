@@ -77,14 +77,20 @@ try {
     [Windows.Forms.Application]::DoEvents()
     $details=$ui.DetailTitle.Text+' '+$ui.DetailBody.Text
     Assert ($details -match [regex]::Escape([IO.Path]::GetFileName($badPath))) 'Selection details omit the affected filename.'
-    Assert ($details -match 'empty|空') 'Selection details omit the actual error reason.'
-    Assert ($details -match '文件.*(读取|校验)' -and $details -match '不代表缩略图加载失败') 'File-check explanation must distinguish file/tag validation from preview loading.'
+    Assert ($details -match '文件没有内容' -and $details -match '重新复制或导出') 'Selection details must explain the empty file and next step in plain Chinese.'
     $originalDiagnostic=$script:LastFileErrors[$badPath.ToLowerInvariant()]
-    Assert ($details.Contains($originalDiagnostic)) 'Chinese explanation discarded the original diagnostic text.'
+    Assert (-not $details.Contains($originalDiagnostic) -and $script:LastFileErrors[$badPath.ToLowerInvariant()] -eq $originalDiagnostic) 'Raw diagnostics should be retained separately from user-facing details.'
     Assert $ui.CopyDetails.Enabled 'Detailed error cannot be copied.'
     # The enabled Copy Details action uses these same title/body values; leave
     # the user's global Windows clipboard untouched during automated tests.
-    Assert ($ui.DetailTitle.Text.Contains('文件检查异常') -and $ui.DetailBody.Text.Contains($originalDiagnostic) -and $ui.DetailBody.Text.Contains('不代表缩略图加载失败')) 'Copy-ready details omit the Chinese explanation or original diagnostic.'
+    Assert ($ui.DetailTitle.Text.Contains('文件检查异常') -and $ui.DetailBody.Text.Contains('文件没有内容') -and $ui.DetailBody.Text.Contains($badPath)) 'Copy-ready details omit the friendly explanation or file location.'
+    $friendly=Get-FriendlyFileDetail $brokenItem '[minor] Non-standard IFD0 tag 0xc6d2 PanasonicTitle; Entries in IFD0 are out of order'
+    Assert ($friendly.Contains('图片附带信息不规范') -and $friendly.Contains('副本') -and $friendly -notmatch 'IFD|Panasonic|0xc6d2') 'EXIF details leak technical jargon or omit a practical next step.'
+    Assert ((Get-FriendlyFileDetail $brokenItem 'Access is denied').Contains('权限不足')) 'Permission errors are mislabeled as damaged files.'
+    Assert ((Get-FriendlyFileDetail $brokenItem 'ExifTool 未返回该文件的有效信息。') -notmatch '附带信息不规范') 'Unknown tool failures must not be diagnosed as EXIF format problems.'
+    Assert ((Get-FriendlyFileDetail $brokenItem 'File is being used by another process').Contains('其他程序')) 'Locked-file guidance does not explain the next step.'
+    $recovery=Get-FriendlyFileDetail $brokenItem "Access is denied`n恢复副本（请勿删除）：C:\Recovery\样本"
+    Assert ($recovery.Contains('C:\Recovery\样本') -and $recovery.Contains('不要删除') -and $recovery -notmatch '重新复制|再试') 'Recovery guidance hides the saved copy or encourages retry before review.'
     # Display copy can change without changing the logical processing state.
     $displayText=$brokenItem.SubItems[2].Text
     $brokenItem.SubItems[2].Text='测试显示文本'

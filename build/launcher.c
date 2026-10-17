@@ -16,7 +16,7 @@
 #include <wchar.h>
 #include <errno.h>
 
-#define APP_VERSION_TEXT "1.3.1"
+#define APP_VERSION_TEXT "1.3.2"
 #define WIDE_TEXT_INNER(text) L##text
 #define WIDE_TEXT(text) WIDE_TEXT_INNER(text)
 #define APP_VERSION WIDE_TEXT(APP_VERSION_TEXT)
