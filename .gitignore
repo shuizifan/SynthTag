@@ -8,3 +8,8 @@ launcher.exe
 *.o
 __pycache__/
 *.res
+*.pdb
+build/launcher_test.exe
+# 诊断包和测试产物不进入仓库
+SynthTag-diagnostics-*.zip
+*.jsonl

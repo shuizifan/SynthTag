@@ -3,6 +3,8 @@
 # Windows 自带 PowerShell + 内置 ExifTool，无需安装任何软件。
 # 功能：批量写入/体检/移除 XMP dc:subject 中的 contains-synthetic-performer
 
+param([switch]$NoUI)
+
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -33,6 +35,15 @@ $VIDEO_EXTS = @('.mp4','.mov','.m4v','.3gp')
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ExifTool  = Join-Path $ScriptDir 'exiftool_bin\exiftool.exe'
+$AppVersion = ([IO.File]::ReadAllText((Join-Path $ScriptDir 'VERSION'))).Trim()
+. (Join-Path $ScriptDir 'runtime.ps1')
+Initialize-SynthTagRuntime -Version $AppVersion -ExifTool $ExifTool
+[Windows.Forms.Application]::SetUnhandledExceptionMode([Windows.Forms.UnhandledExceptionMode]::CatchException)
+[Windows.Forms.Application]::add_ThreadException({
+    param($sender,$eventArgs)
+    Write-AppLog -Level ERROR -Message 'Unhandled UI exception' -Data $eventArgs.Exception
+    [Windows.Forms.MessageBox]::Show('发生未处理异常：'+$eventArgs.Exception.Message+"`n请在设置中导出诊断包。",'SynthTag','OK','Error') | Out-Null
+})
 if (-not (Test-Path $ExifTool)) {
     [System.Windows.Forms.MessageBox]::Show(
         "未找到 exiftool_bin\exiftool.exe`n请确保 exiftool_bin 文件夹与本程序在同一目录。",
@@ -43,64 +54,16 @@ if (-not (Test-Path $ExifTool)) {
 $STATUS_TEXT = @{
     pending='待处理'; tagged='√ 已打标签'; untagged='× 未打标签'
     duplicate='! 重复标签'; unreadable='× 读取失败'; added='√ 已添加'
-    fixed_duplicate='√ 已去重'; skipped='— 跳过'; removed='√ 已移除'; failed='× 失败'
+    warning='! 已写入，有警告'; fixed_duplicate='√ 已去重'; skipped='— 跳过'; removed='√ 已移除'; failed='× 失败'
 }
-$PROBLEM = @('untagged','duplicate','unreadable','failed')
+$PROBLEM = @('untagged','duplicate','unreadable','failed','warning')
 
-# ---------------- ExifTool 调用 ----------------
-function Invoke-ExifTool([string[]]$ExifArgs, [string[]]$Files) {
-    $all = @('-charset','filename=utf8','-charset','utf8') + $ExifArgs + $Files
-    $tmp = [IO.Path]::GetTempFileName()
-    [IO.File]::WriteAllLines($tmp, $all, (New-Object Text.UTF8Encoding($false)))
-    try {
-        $psi = New-Object Diagnostics.ProcessStartInfo
-        $psi.FileName = $ExifTool
-        $psi.Arguments = '-@ "' + $tmp + '"'
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow  = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError  = $true
-        $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
-        $psi.StandardErrorEncoding  = [Text.Encoding]::UTF8
-        $p = [Diagnostics.Process]::Start($psi)
-        $errTask = $p.StandardError.ReadToEndAsync()
-        $out = $p.StandardOutput.ReadToEnd()
-        $p.WaitForExit()
-        $script:LastExifError = $errTask.Result   # 保留 stderr 便于失败诊断
-        return $out
-    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
-}
-
-function Get-Subjects([string[]]$Files) {
-    # 返回 hashtable: 小写全路径 -> string[] 关键词（读取失败 = $null 不出现在结果里）
-    $map = @{}
-    for ($i = 0; $i -lt $Files.Count; $i += 100) {
-        $slice = $Files[$i..([Math]::Min($i+100,$Files.Count)-1)]
-        $out = Invoke-ExifTool @('-j','-XMP-dc:Subject','-api','largefilesupport=1') $slice
-        if ($out.Trim()) {
-            try { $items = $out | ConvertFrom-Json } catch { $items = @() }
-            foreach ($it in @($items)) {
-                $full = [IO.Path]::GetFullPath($it.SourceFile).ToLower()
-                $subj = @()
-                if ($null -ne $it.Subject) { $subj = @($it.Subject | ForEach-Object { "$_" }) }
-                $map[$full] = $subj
-            }
-        }
-    }
-    return $map
-}
-
-function Get-FileState([string[]]$subjects) {
-    if ($null -eq $subjects) { return 'unreadable' }
-    $n = @($subjects | Where-Object { $_ -eq $TAG }).Count
-    if ($n -eq 0) { return 'untagged' }
-    if ($n -eq 1) { return 'tagged' }
-    return 'duplicate'
-}
+# 独立的日志与安全文件处理模块（单文件版也随包解压）
+. (Join-Path $ScriptDir 'metadata.ps1')
 
 # ---------------- 界面 ----------------
 $form = New-Object Windows.Forms.Form
-$form.Text = "SynthTag — AI 人物标签批量工具 ($TAG)"
+$form.Text = "SynthTag（打AI标签） v$AppVersion"
 $form.Size = New-Object Drawing.Size(900, 640)
 $form.MinimumSize = New-Object Drawing.Size(720, 500)
 $form.StartPosition = 'CenterScreen'
@@ -140,6 +103,9 @@ $btnFolder = New-Object Windows.Forms.Button
 $btnFolder.Text = '添加文件夹…'; $btnFolder.Location = New-Object Drawing.Point(108, 34); $btnFolder.Size = New-Object Drawing.Size(100, 28)
 $btnClear  = New-Object Windows.Forms.Button
 $btnClear.Text = '清空列表';     $btnClear.Location = New-Object Drawing.Point(214, 34);  $btnClear.Size = New-Object Drawing.Size(80, 28)
+
+$btnSettings = New-Object Windows.Forms.Button
+$btnSettings.Text = '设置…'; $btnSettings.Location = New-Object Drawing.Point(310,34); $btnSettings.Size = New-Object Drawing.Size(80,28)
 
 $chkBackup = New-Object Windows.Forms.CheckBox
 $chkBackup.Text = '保留 _original 备份'
@@ -213,7 +179,7 @@ $lblStatus.Location = New-Object Drawing.Point(12, 560)
 $lblStatus.Size = New-Object Drawing.Size(860, 30)
 $lblStatus.Anchor = 'Bottom,Left,Right'
 
-$form.Controls.AddRange(@($lblHint,$btnFiles,$btnFolder,$btnClear,$chkBackup,
+$form.Controls.AddRange(@($lblHint,$btnFiles,$btnFolder,$btnClear,$btnSettings,$chkBackup,
                           $list,$btnAdd,$btnScan,$btnRemove,$btnExport,$bar,$lblStatus))
 
 # ---------------- 列表管理 ----------------
@@ -235,13 +201,13 @@ function Add-Paths([string[]]$paths) {
     }
     $files = New-Object Collections.Generic.List[string]
     foreach ($p in $paths) {
-        if (Test-Path $p -PathType Container) {
+        if (Test-Path -LiteralPath $p -PathType Container) {
             Get-ChildItem -LiteralPath $p -Recurse -File |
                 Where-Object { $EXTS -contains $_.Extension.ToLower() } |
                 ForEach-Object { $files.Add($_.FullName) }
-        } elseif (Test-Path $p -PathType Leaf) {
+        } elseif (Test-Path -LiteralPath $p -PathType Leaf) {
             if ($EXTS -contains ([IO.Path]::GetExtension($p).ToLower())) {
-                $files.Add((Resolve-Path -LiteralPath $p).Path)
+                $files.Add([IO.Path]::GetFullPath($p))
             }
         }
     }
@@ -287,6 +253,7 @@ function Update-TagStatus([string[]]$files) {
         }
         $list.EndUpdate()
     } catch {
+        Write-AppLog -Level ERROR -Message 'Tag status check failed' -Data $_
         $lblStatus.Text = "标签状态检查失败: $($_.Exception.Message)"
         return
     } finally {
@@ -300,6 +267,9 @@ function Set-ItemStatus([string]$file, [string]$state) {
     $it = $script:Items[$file.ToLower()]
     if (-not $it) { return }
     $it.SubItems[2].Text = $STATUS_TEXT[$state]
+    $reason = $script:LastFileErrors[$file.ToLowerInvariant()]
+    if (-not $reason) { $reason=$script:LastFileWarnings[$file.ToLowerInvariant()] }
+    $it.ToolTipText = $file + $(if ($reason) { "`n" + $reason } else { '' })
     # 已有标签的文件: 划删除线 + 灰色, 一眼看出本次无需处理
     $done = @('tagged','added','fixed_duplicate','skipped')
     if ($state -in $done) { $it.Font = $script:FontStrike } else { $it.Font = $script:FontNormal }
@@ -333,8 +303,10 @@ function Update-Counts {
             'added'     { $tagged++ }
             'fixed_duplicate' { $tagged++ }
             'skipped'   { $tagged++ }
+            'removed'   { $todo++ }
             'unreadable' { $bad++ }
             'failed'    { $bad++ }
+            'warning'   { $bad++ }
         }
     }
     $btnAdd.Text = if ($todo -gt 0) { "开始添加标签 ($todo)" } else { '开始添加标签' }
@@ -489,30 +461,24 @@ $btnClear.Add_Click({
 
 # ---------------- 核心操作 ----------------
 function Set-Buttons([bool]$enabled) {
-    foreach ($b in @($btnAdd,$btnScan,$btnRemove,$btnFiles,$btnFolder,$btnClear)) { $b.Enabled = $enabled }
+    foreach ($b in @($btnAdd,$btnScan,$btnRemove,$btnFiles,$btnFolder,$btnClear,$btnSettings,$btnExport,$chkBackup)) { $b.Enabled = $enabled }
 }
 
 function Get-AllFiles { @($list.Items | ForEach-Object { $_.Tag }) }
 
-function Invoke-Chunked([string[]]$files, [string[]]$writeArgs, [scriptblock]$verify, [ref]$counts) {
-    # 分块写入 -> 回读验证 -> 更新界面
-    for ($i = 0; $i -lt $files.Count; $i += 100) {
-        $slice = @($files[$i..([Math]::Min($i+100,$files.Count)-1)])
-        $null = Invoke-ExifTool $writeArgs $slice
-        $after = Get-Subjects $slice
-        foreach ($f in $slice) {
-            $subj = $after[$f.ToLower()]
-            $state = & $verify $subj
-            # 不保留备份时: 写入验证成功后由工具删除 _original
-            # (不用 exiftool 的 -overwrite_original, 其"删除+改名"在部分受保护目录会被系统拦截)
-            if (-not $chkBackup.Checked -and $state -ne 'failed') {
-                Remove-Item -LiteralPath ($f + '_original') -Force -ErrorAction SilentlyContinue
-            }
-            $counts.Value[$state] = 1 + $(if ($counts.Value.ContainsKey($state)) { $counts.Value[$state] } else { 0 })
-            Set-ItemStatus $f $state
-            $bar.Value = [Math]::Min($bar.Value + 1, $bar.Maximum)
-        }
+function Invoke-Chunked([string[]]$files, [string]$mode, [string]$successState, [ref]$counts) {
+    foreach ($f in $files) {
+        $lblStatus.Text = '正在处理：' + [IO.Path]::GetFileName($f)
         [Windows.Forms.Application]::DoEvents()
+        $result = Set-SafeFileTag -File $f -Mode $mode -KeepBackup $chkBackup.Checked
+        $state = if ($result.Success) { $successState } else { 'failed' }
+        if ($result.Success -and $result.Warning) {
+            $state = 'warning'
+            $script:LastFileErrors[$f.ToLowerInvariant()] = $result.Warning
+        }
+        $counts.Value[$state] = 1 + $(if ($counts.Value.ContainsKey($state)) { $counts.Value[$state] } else { 0 })
+        Set-ItemStatus $f $state
+        $bar.Value = [Math]::Min($bar.Value+1,$bar.Maximum)
     }
 }
 
@@ -542,6 +508,7 @@ function Run-Action([string]$action) {
         if ($r -ne 'OK') { return }
     }
 
+    Write-AppLog -Level INFO -Message 'Batch started' -Data @{ action=$action; count=$files.Count; backup=$chkBackup.Checked }
     $script:Busy = $true; Set-Buttons $false
     $bar.Value = 0; $bar.Maximum = [Math]::Max($files.Count, 1)
     $lblStatus.Text = '处理中，请稍候…'
@@ -576,32 +543,21 @@ function Run-Action([string]$action) {
             $dups = @($files | Where-Object { $states[$_] -eq 'duplicate' })
             $refC = [ref]$counts
             if ($todo.Count) {
-                Invoke-Chunked $todo @("-XMP-dc:Subject+=$TAG") `
-                    { param($s) if ($null -ne $s -and $s -contains $TAG) { 'added' } else { 'failed' } } $refC
+                Invoke-Chunked $todo 'add' 'added' $refC
             }
             if ($dups.Count) {
-                Invoke-Chunked $dups @("-XMP-dc:Subject-=$TAG","-XMP-dc:Subject+=$TAG") `
-                    { param($s) if ($null -ne $s -and @($s | Where-Object { $_ -eq $TAG }).Count -eq 1) { 'fixed_duplicate' } else { 'failed' } } $refC
+                Invoke-Chunked $dups 'normalize' 'fixed_duplicate' $refC
             }
             $bar.Value = $bar.Maximum
             $nAdd  = $(if ($counts.ContainsKey('added')) { $counts['added'] } else { 0 })
             $nFix  = $(if ($counts.ContainsKey('fixed_duplicate')) { $counts['fixed_duplicate'] } else { 0 })
             $nSkip = $counts['skipped']; $nFail = $(if ($counts.ContainsKey('failed')) { $counts['failed'] } else { 0 })
-            $lblStatus.Text = "添加完成 — 新写入 $nAdd，去重修复 $nFix，已有跳过 $nSkip，失败 $nFail。（每个文件写入后均已回读验证）"
-            if ($nFail -gt 0) {
-                $hint = ''
-                if ($script:LastExifError) {
-                    $hint = "`n`n技术信息:`n" + $script:LastExifError.Substring(0, [Math]::Min(400, $script:LastExifError.Length))
-                }
-                [Windows.Forms.MessageBox]::Show(
-                    "$nFail 个文件处理失败（可能只读/被占用/格式不支持）。`n可点「导出问题清单」保存列表。$hint",
-                    '有失败项','OK','Warning') | Out-Null
-            }
+            $lblStatus.Text = "添加完成 — 新写入 $nAdd，去重修复 $nFix，已有跳过 $nSkip，失败 $nFail。（已校验媒体内容及写回文件）"
         }
         elseif ($action -eq 'remove') {
             $counts = @{}
             $skipped = @($files | Where-Object { $states[$_] -eq 'untagged' })
-            foreach ($f in $skipped) { Set-ItemStatus $f 'skipped'; $bar.Value++ }
+            foreach ($f in $skipped) { Set-ItemStatus $f 'untagged'; $bar.Value++ }
             $counts['skipped'] = $skipped.Count
             $bad = @($files | Where-Object { $states[$_] -eq 'unreadable' })
             foreach ($f in $bad) { Set-ItemStatus $f 'failed'; $bar.Value++ }
@@ -610,8 +566,7 @@ function Run-Action([string]$action) {
             $todo = @($files | Where-Object { $states[$_] -in @('tagged','duplicate') })
             $refC = [ref]$counts
             if ($todo.Count) {
-                Invoke-Chunked $todo @("-XMP-dc:Subject-=$TAG") `
-                    { param($s) if ($null -ne $s -and $s -notcontains $TAG) { 'removed' } else { 'failed' } } $refC
+                Invoke-Chunked $todo 'remove' 'removed' $refC
             }
             $bar.Value = $bar.Maximum
             $nRem  = $(if ($counts.ContainsKey('removed')) { $counts['removed'] } else { 0 })
@@ -620,13 +575,21 @@ function Run-Action([string]$action) {
         }
     } catch {
         $errDetail = "处理出错(行 $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
-        Write-Output $errDetail
-        Write-Output $_.ScriptStackTrace
+        Write-AppLog -Level ERROR -Message 'Batch exception' -Data $_
+        foreach ($f in $files) { if ((Get-ItemState $script:Items[$f.ToLowerInvariant()]) -in @('pending','untagged','duplicate','tagged')) { $script:LastFileErrors[$f.ToLowerInvariant()]=$errDetail; Set-ItemStatus $f 'failed' } }
         [Windows.Forms.MessageBox]::Show($errDetail,'出错','OK','Error') | Out-Null
         $lblStatus.Text = $errDetail
     } finally {
+        $warnings = @($list.Items | Where-Object { (Get-ItemState $_) -eq 'warning' }).Count
+        $failures = @($list.Items | Where-Object { (Get-ItemState $_) -in @('failed','unreadable') }).Count
+        if ($warnings) { $lblStatus.Text += " 警告 $warnings。" }
+        Write-AppLog -Level $(if ($failures) { 'ERROR' } elseif ($warnings) { 'WARNING' } else { 'INFO' }) -Message 'Batch finished' -Data @{ action=$action; summary=$lblStatus.Text; failures=$failures; warnings=$warnings }
         $script:Busy = $false; Set-Buttons $true
         Update-Counts
+        if ($failures -or $warnings) {
+            [Windows.Forms.MessageBox]::Show("失败/读取异常 $failures 个，警告 $warnings 个。`n将鼠标停在异常行查看原因；可导出问题清单，或在设置中打包诊断日志。`n如提示恢复副本，请保留该目录。",'处理存在异常','OK','Warning') | Out-Null
+        }
+        if (-not $script:RuntimeLogHealthy) { $lblStatus.Text += ' 日志无法写入，请查看设置。' }
         $script:OpDone = $true   # 下次添加文件时自动清空列表
     }
 }
@@ -647,11 +610,77 @@ $btnExport.Add_Click({
     $dlg.FileName = '问题文件清单.csv'
     $dlg.Filter = 'CSV 文件 (*.csv)|*.csv'
     if ($dlg.ShowDialog() -eq 'OK') {
-        $lines = @('文件路径,状态')
-        foreach ($r in $rows) { $lines += ('"' + $r.Text + '",' + $r.SubItems[2].Text) }
-        [IO.File]::WriteAllLines($dlg.FileName, $lines, (New-Object Text.UTF8Encoding($true)))
+        try {
+            $records = @($rows | ForEach-Object { [pscustomobject]@{ '文件路径'=[string]$_.Tag; '状态'=$_.SubItems[2].Text; '原因'=$script:LastFileErrors[([string]$_.Tag).ToLowerInvariant()] } })
+            $records | Export-Csv -LiteralPath $dlg.FileName -NoTypeInformation -Encoding UTF8
+            Write-AppLog -Level INFO -Message 'Problem list exported' -Data @{ count=$rows.Count }
+        } catch {
+            Write-AppLog -Level ERROR -Message 'Problem list export failed' -Data $_
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message,'导出失败','OK','Error') | Out-Null
+            return
+        }
         $lblStatus.Text = "已导出 $($rows.Count) 条到 $($dlg.FileName)"
     }
 })
 
-$null = $form.ShowDialog()
+# ---------------- 设置与诊断 ----------------
+function New-SettingsDialog {
+    $settings = New-Object Windows.Forms.Form
+    $settings.Text = "SynthTag 设置 · v$AppVersion"
+    $settings.Size = New-Object Drawing.Size(620,350)
+    $settings.StartPosition = 'CenterParent'
+    $settings.Font = $form.Font
+    $settings.FormBorderStyle = 'FixedDialog'
+    $settings.MaximizeBox = $false; $settings.MinimizeBox = $false
+    $info = New-Object Windows.Forms.Label
+    $info.Location = New-Object Drawing.Point(18,18); $info.Size = New-Object Drawing.Size(570,170)
+    $health = if ($script:RuntimeLogHealthy) { '正常' } else { '异常：'+$script:LastLogError }
+    $info.Text = "SynthTag（打AI标签） v$AppVersion`nExifTool：$script:RuntimeExifToolVersion`n日志级别：INFO / WARNING / ERROR，保留近30天`n日志目录：$script:LogDirectory`n日志状态：$health`n`n诊断包包括版本、系统/存储环境、日志和问题清单。`n不包含图片或恢复副本；日志可能含文件名和共享路径，请确认后再分享。"
+    $openLogs = New-Object Windows.Forms.Button
+    $openLogs.Text = '打开日志目录'; $openLogs.Location = New-Object Drawing.Point(18,205); $openLogs.Size = New-Object Drawing.Size(130,32)
+    $openLogs.Add_Click({
+        try { $null=[IO.Directory]::CreateDirectory($script:LogDirectory); Start-Process explorer.exe -ArgumentList ('"'+$script:LogDirectory+'"') }
+        catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message,'无法打开','OK','Error') | Out-Null }
+    })
+    $export = New-Object Windows.Forms.Button
+    $export.Text = '打包诊断压缩包…'; $export.Location = New-Object Drawing.Point(160,205); $export.Size = New-Object Drawing.Size(160,32)
+    $export.Add_Click({
+        $dialog = New-Object Windows.Forms.SaveFileDialog
+        $dialog.Filter = 'ZIP 诊断压缩包 (*.zip)|*.zip'
+        $dialog.FileName = 'SynthTag-diagnostics-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.zip'
+        if ($dialog.ShowDialog() -ne 'OK') { return }
+        try {
+            $issues = @($list.Items | Where-Object { (Get-ItemState $_) -in $PROBLEM } | ForEach-Object { @{ file=[string]$_.Tag; state=$_.SubItems[2].Text; reason=$script:LastFileErrors[([string]$_.Tag).ToLowerInvariant()] } })
+            $bundle = Export-DiagnosticBundle -Destination $dialog.FileName -Context @{ fileCount=$list.Items.Count; summary=$lblStatus.Text; issues=$issues; keepBackup=$chkBackup.Checked }
+            [Windows.Forms.MessageBox]::Show("已保存诊断包：`n$bundle",'导出完成','OK','Information') | Out-Null
+        } catch {
+            Write-AppLog -Level ERROR -Message 'Diagnostic export UI failure' -Data $_
+            [Windows.Forms.MessageBox]::Show($_.Exception.Message,'诊断包导出失败','OK','Error') | Out-Null
+        } finally { $dialog.Dispose() }
+    })
+    $settings.Controls.AddRange(@($info,$openLogs,$export))
+    return $settings
+}
+
+function Show-Settings {
+    $settings = New-SettingsDialog
+    try { $null=$settings.ShowDialog($form) } finally { $settings.Dispose() }
+}
+$btnSettings.Add_Click({ Show-Settings })
+$form.Add_FormClosing({
+    param($sender,$eventArgs)
+    if ($script:Busy) { $eventArgs.Cancel=$true; $lblStatus.Text='正在处理文件，请等待本次处理完成后再关闭。'; return }
+    Write-AppLog -Level INFO -Message 'Application closed'
+})
+$form.Add_Shown({
+    if (-not $script:RuntimeLogHealthy) { $lblStatus.Text='日志无法写入，请在设置中查看原因。' }
+    $workRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SynthTag\Work'
+    if ([IO.Directory]::Exists($workRoot)) {
+        $journals = @(Get-ChildItem -LiteralPath $workRoot -Filter recovery.json -Recurse -File -ErrorAction SilentlyContinue)
+        if ($journals.Count) {
+            Write-AppLog -Level WARNING -Message 'Unresolved file recovery journals found' -Data @{ count=$journals.Count; directory=$workRoot }
+            [Windows.Forms.MessageBox]::Show("发现 $($journals.Count) 个上次写入留下的恢复记录，请保留并核对：`n$workRoot`n诊断包不包含恢复图片。",'存在待核对的恢复副本','OK','Warning') | Out-Null
+        }
+    }
+})
+if (-not $NoUI) { $null = $form.ShowDialog() }

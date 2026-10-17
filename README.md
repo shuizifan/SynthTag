@@ -6,12 +6,15 @@
 
 ## 功能
 
+- 窗口标题显示 **SynthTag（打AI标签） v1.1.0**
 - 拖入文件或文件夹（递归子目录），批量写入合规标签
 - **加入即检测**：列表直接标出标签状态，已有标签的文件划删除线置灰，主按钮实时显示待处理数量
 - 写入前查重自动跳过，写入后立即回读验证，重复标签自动归一
 - 体检扫描：区分 已打标签 / 未打标签 / 重复 / 读取失败
-- 支持移除标签、导出问题清单 CSV
-- 本地离线运行，不联网、不上传；中文/空格路径无压力
+- 支持移除标签、导出带完整路径和错误原因的问题清单 CSV
+- 设置中打开本地日志目录、导出诊断 ZIP；INFO / WARNING / ERROR 分级，保留近30天
+- 支持中文、空格、方括号路径；处理本地目录、UNC/映射共享目录和虚拟挂载盘
+- 应用不主动上传日志或诊断包；共享目录/网盘挂载的文件读写由 Windows 和对应客户端执行
 
 ### 列表操作
 
@@ -31,7 +34,7 @@
 
 **方式一（推荐）**：下载 `SynthTag.exe`，双击即用。单文件免安装，首次运行自动解压内置组件（约 35MB）到本机缓存。
 
-**方式二**：克隆仓库后双击 `start.bat`（需 `app.ps1` 与 `exiftool_bin` 在同一目录）。
+**方式二**：克隆仓库后双击 `start.bat`（需 `app.ps1`、`runtime.ps1`、`metadata.ps1`、`VERSION` 与 `exiftool_bin` 在同一目录）。
 
 > 首次运行如遇 SmartScreen 提示，点「更多信息 → 仍要运行」。
 
@@ -39,20 +42,52 @@
 
 ⚠ 是否属于"AI 生成的逼真人物"需人工判断：真实人物、影视/游戏角色、卡通形象、无人物的图**不需要**打标签。
 
+## 共享文件夹写入与异常排查（1.1.0）
+
+1. 先把原文件读取到本机工作目录，ExifTool 仅修改本地副本。
+2. 校验媒体结构、标签及图片/视频内容 SHA-256；PNG 额外逐块检查 CRC，防止把元数据可读当成图片完整。
+3. 将结果写入目标目录独立临时文件，刷盘并核对完整文件 SHA-256，再使用带备份的替换操作提交；回读通过后才显示成功。
+4. 存储驱动明确不支持 `File.Replace` 时，尝试“先完整备份，再重命名替换”的兼容路径；权限、占用、断线等其他错误直接失败。
+
+失败项会标红，悬停查看具体原因，并可导出问题清单。既存 `_original` / `_exiftool_tmp` 不会被自动覆盖或清理，需先人工确认。发生提交异常时，本地工作目录和恢复记录会保留，下次启动提醒核对；请保留提示的恢复路径。替换期间若发现其他程序修改了原图，会保留备份供核对。
+
+这些措施不能替代远程服务器、网盘客户端的存储可靠性或云端同步状态检查。对不支持安全写入的存储会明确报错。当前验证覆盖 Windows PowerShell 5.1、中文路径、本地文件、本机 SMB/UNC、锁定/只读/损坏输入和写入/替换失败注入；另在实际网盘挂载测试空间验证了PNG/JPEG各6张副本的添加、备份、移除及内容校验。**尚未在美工现场的远程共享目录复现原问题**。视频格式保留支持，本轮未做视频实测。
+
+## 日志与诊断包
+
+- 日志：`%LOCALAPPDATA%\SynthTag\Logs`，按本地日期记录，保留今天及前29天；启动及跨日记录时清理过期日志。
+- 严重等级：`INFO`（正常操作）、`WARNING`（警告/兼容处理）、`ERROR`（读取、写入、校验或运行异常）。包含时间、会话、软件版本和必要文件路径。
+- 软件中点 **设置 → 打包诊断压缩包**，选择保存位置即可得到 ZIP。ZIP含近30天应用/启动器日志、软件/ExifTool版本、Windows/PowerShell/.NET、架构、语言、时区、磁盘类型/文件系统和 Dokan 安装证据及问题状态。
+- 诊断包不含图片、视频、恢复副本或凭证文件；用户名目录和识别到的敏感字段脱敏。文件名、共享路径可能保留，分享前请确认。
+- 故障恢复副本与日志分开保存于本机 `%LOCALAPPDATA%\SynthTag\Work`；它们可能含原始图片，不随诊断包导出，也不会套用30天日志清理。
+- 单文件组件缓存：`%LOCALAPPDATA%\SynthTag\Cache\1.1.0-<payload SHA256>`，升级不会仅凭包大小复用旧代码。
+
 ## 从源码构建
 
 依赖：[Zig](https://ziglang.org/)（交叉编译启动器）+ Python 3。
 
-```bash
+```powershell
 # 1. 编译图标资源
 zig rc build/app.rc build/app.res
 
 # 2. 编译启动器 (任意平台均可交叉编译出 Windows exe)
-zig cc -target x86_64-windows-gnu -O2 -s -Wl,--subsystem,windows \
-  -o launcher.exe build/launcher.c build/app.res
+zig cc -target x86_64-windows-gnu -O2 -s '-Wl,--subsystem,windows' -o launcher.exe build/launcher.c build/app.res -lbcrypt
 
-# 3. 打包: launcher + app.ps1 + 图标 + exiftool_bin -> 单文件 exe
-python3 build/make_payload.py launcher.exe SynthTag.exe .
+# 3. 打包: launcher + 应用脚本 + 版本 + 图标 + exiftool_bin -> 单文件 exe
+python build/make_payload.py launcher.exe SynthTag.exe .
+```
+
+如果通过 `python -m pip install ziglang` 安装编译器，将上述 `zig` 替换为 `python -m ziglang`。
+
+Windows 回归测试：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/metadata.tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/runtime.tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/app.tests.ps1
+zig cc -target x86_64-windows-gnu -O2 -DTEST_CLI '-Wl,--subsystem,console' -o build/launcher_test.exe build/launcher.c -lbcrypt
+python build/test_launcher.py build/launcher_test.exe
+python build/test_packaging.py launcher.exe
 ```
 
 ## 目录结构
@@ -60,12 +95,16 @@ python3 build/make_payload.py launcher.exe SynthTag.exe .
 ```
 SynthTag.exe        单文件版（launcher + app.ps1 + ExifTool 自解压包）
 app.ps1             主程序（PowerShell + WinForms 图形界面）
+metadata.ps1        安全文件读写、校验、恢复流程
+runtime.ps1         本地日志、环境诊断、ZIP导出
+VERSION             应用版本
 start.bat           文件夹版启动入口
 exiftool_bin/       内置 ExifTool（亚马逊官方指南推荐的元数据引擎）
 assets/             图标源文件（icon.svg + 多尺寸 ICO）
 build/launcher.c    自解压启动器源码（C）
 build/app.rc        图标资源脚本
 build/make_payload.py  打包脚本
+tests/              Windows PowerShell 回归测试
 ```
 
 图标基于 [Lucide](https://lucide.dev)（ISC License）的 tag / sparkle 图形二次设计。
