@@ -13,7 +13,7 @@ def build_payload(src_dir):
     chunks = []
     entries = []
     # Required files fail the build early rather than producing an incomplete EXE.
-    required = ("app.ps1", "runtime.ps1", "metadata.ps1", "VERSION")
+    required = ("app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "VERSION")
     targets = [(name, os.path.join(src_dir, name)) for name in required]
     for _rel, full in targets:
         if not os.path.isfile(full):

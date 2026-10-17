@@ -12,8 +12,9 @@ import tempfile
 import unittest
 
 LAUNCHER = Path(sys.argv.pop(1)).resolve()
-REQUIRED = {"app.ps1": b"old", "runtime.ps1": b"runtime", "metadata.ps1": b"metadata",
-            "VERSION": b"1.1.0", "SynthTag.ico": b"icon", "exiftool_bin/exiftool.exe": b"exe",
+VERSION = Path(__file__).resolve().parents[1].joinpath("VERSION").read_text(encoding="utf-8-sig").strip()
+REQUIRED = {"app.ps1": b"old", "runtime.ps1": b"runtime", "metadata.ps1": b"metadata", "ui.ps1": b"ui module",
+            "VERSION": VERSION.encode("ascii"), "SynthTag.ico": b"icon", "exiftool_bin/exiftool.exe": b"exe",
             "exiftool_bin/exiftool_files/perl.exe": b"perl executable",
             "exiftool_bin/exiftool_files/perl532.dll": b"perl runtime",
             "exiftool_bin/exiftool_files/exiftool.pl": b"exiftool script",
@@ -78,10 +79,17 @@ class LauncherTests(unittest.TestCase):
         self.run_extract(package)
         self.assertEqual(REQUIRED[name], (self.dest / name).read_bytes())
 
+    def test_deleted_ui_module_repaired(self):
+        package, _ = self.package()
+        self.run_extract(package)
+        (self.dest / "ui.ps1").unlink()
+        self.run_extract(package)
+        self.assertEqual(REQUIRED["ui.ps1"], (self.dest / "ui.ps1").read_bytes())
+
     def test_same_size_corruption_and_truncated_dependency_repaired(self):
         package, _ = self.package()
         self.run_extract(package)
-        for name in ("app.ps1", "exiftool_bin/exiftool_files/lib/Image/ExifTool.pm"):
+        for name in ("app.ps1", "ui.ps1", "exiftool_bin/exiftool_files/lib/Image/ExifTool.pm"):
             with self.subTest(name=name):
                 (self.dest / name).write_bytes(b"x" * len(REQUIRED[name]))
                 self.run_extract(package)

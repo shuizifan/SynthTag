@@ -16,7 +16,10 @@
 #include <wchar.h>
 #include <errno.h>
 
-#define APP_VERSION L"1.1.0"
+#define APP_VERSION_TEXT "1.2.0"
+#define WIDE_TEXT_INNER(text) L##text
+#define WIDE_TEXT(text) WIDE_TEXT_INNER(text)
+#define APP_VERSION WIDE_TEXT(APP_VERSION_TEXT)
 #define MAGIC "AITAGPK1"
 #define PATH_CAP 32768
 #define CHUNK (1 << 20)
@@ -52,7 +55,7 @@ static void log_message(const char *level, const char *msg, unsigned long code) 
     if (!join(path, log_dir, name)) return;
     FILE *f = _wfopen(path, L"ab");
     if (!f) return;
-    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d [%s] version=1.1.0 %s code=%lu\r\n",
+    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d [%s] version=" APP_VERSION_TEXT " %s code=%lu\r\n",
             now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond,
             level, msg, code);
     fclose(f);

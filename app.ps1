@@ -52,9 +52,9 @@ if (-not (Test-Path $ExifTool)) {
 }
 
 $STATUS_TEXT = @{
-    pending='待处理'; tagged='√ 已打标签'; untagged='× 未打标签'
-    duplicate='! 重复标签'; unreadable='× 读取失败'; added='√ 已添加'
-    warning='! 已写入，有警告'; fixed_duplicate='√ 已去重'; skipped='— 跳过'; removed='√ 已移除'; failed='× 失败'
+    pending='待检查'; tagged='已有标签'; untagged='待添加'
+    duplicate='标签重复'; unreadable='读取失败'; added='添加成功'
+    warning='已完成 · 有警告'; fixed_duplicate='已去重'; skipped='已跳过'; removed='已移除'; failed='处理失败'
 }
 $PROBLEM = @('untagged','duplicate','unreadable','failed','warning')
 
@@ -62,13 +62,14 @@ $PROBLEM = @('untagged','duplicate','unreadable','failed','warning')
 . (Join-Path $ScriptDir 'metadata.ps1')
 
 # ---------------- 界面 ----------------
-$form = New-Object Windows.Forms.Form
-$form.Text = "SynthTag（打AI标签） v$AppVersion"
-$form.Size = New-Object Drawing.Size(900, 640)
-$form.MinimumSize = New-Object Drawing.Size(720, 500)
-$form.StartPosition = 'CenterScreen'
-$form.Font = New-Object Drawing.Font('Microsoft YaHei UI', 9)
-$form.AllowDrop = $true
+. (Join-Path $ScriptDir 'ui.ps1')
+$ui = New-SynthTagWindow -Version $AppVersion
+$form=$ui.Form; $list=$ui.List; $bar=$ui.Bar; $lblStatus=$ui.Status
+$btnFiles=$ui.Files; $btnFolder=$ui.Folder; $btnPaste=$ui.Paste; $btnClear=$ui.Clear
+$btnSettings=$ui.Settings; $chkBackup=$ui.Backup
+$btnAdd=$ui.Add; $btnScan=$ui.Scan; $btnRemove=$ui.Remove; $btnExport=$ui.Export
+$menu=$ui.Menu; $miOpenFolder=$ui.OpenFolder; $miCopyPath=$ui.CopyPath
+$miRemoveSel=$ui.RemoveSelected; $miKeepSel=$ui.KeepSelected; $miPaste=$ui.PasteMenu; $miSelectAll=$ui.SelectAll
 # 窗口/任务栏图标（单文件版解压到同目录，文件夹版在 assets\ 下）
 $script:AppIcon = $null
 foreach ($p in @((Join-Path $ScriptDir 'SynthTag.ico'), (Join-Path $ScriptDir 'assets\SynthTag.ico'))) {
@@ -91,114 +92,21 @@ $form.Add_Shown({
     }
 })
 
-$lblHint = New-Object Windows.Forms.Label
-$lblHint.Text = '拖入文件/文件夹，或按 Ctrl+V 粘贴路径（子目录自动递归；选中后按 Delete 移出列表）'
-$lblHint.ForeColor = [Drawing.Color]::DimGray
-$lblHint.Location = New-Object Drawing.Point(12, 10)
-$lblHint.AutoSize = $true
-
-$btnFiles  = New-Object Windows.Forms.Button
-$btnFiles.Text = '添加文件…';   $btnFiles.Location = New-Object Drawing.Point(12, 34);  $btnFiles.Size = New-Object Drawing.Size(90, 28)
-$btnFolder = New-Object Windows.Forms.Button
-$btnFolder.Text = '添加文件夹…'; $btnFolder.Location = New-Object Drawing.Point(108, 34); $btnFolder.Size = New-Object Drawing.Size(100, 28)
-$btnClear  = New-Object Windows.Forms.Button
-$btnClear.Text = '清空列表';     $btnClear.Location = New-Object Drawing.Point(214, 34);  $btnClear.Size = New-Object Drawing.Size(80, 28)
-
-$btnSettings = New-Object Windows.Forms.Button
-$btnSettings.Text = '设置…'; $btnSettings.Location = New-Object Drawing.Point(310,34); $btnSettings.Size = New-Object Drawing.Size(80,28)
-
-$chkBackup = New-Object Windows.Forms.CheckBox
-$chkBackup.Text = '保留 _original 备份'
-$chkBackup.Checked = $false
-$chkBackup.AutoSize = $true
-$chkBackup.Location = New-Object Drawing.Point(720, 40)
-$chkBackup.Anchor = 'Top,Right'
-
-$list = New-Object Windows.Forms.ListView
-$list.View = 'Details'
-$list.FullRowSelect = $true
-$list.GridLines = $true
-$list.HideSelection = $false
-$list.ShowItemToolTips = $true
-$list.Location = New-Object Drawing.Point(12, 70)
-$list.Size = New-Object Drawing.Size(860, 420)
-$list.Anchor = 'Top,Bottom,Left,Right'
-$null = $list.Columns.Add('文件名', 260)
-$null = $list.Columns.Add('类型', 55)
-$null = $list.Columns.Add('状态', 120)
-$null = $list.Columns.Add('所在文件夹', 400)
-$list.AllowDrop = $true
-
-# 右键菜单（借鉴文件管理类软件的常用操作）
-$menu = New-Object Windows.Forms.ContextMenuStrip
-$miOpenFolder = $menu.Items.Add('打开所在文件夹')
-$miCopyPath   = $menu.Items.Add('复制完整路径')
-$null = $menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
-$miRemoveSel  = $menu.Items.Add('从列表移除选中项   Delete')
-$miKeepSel    = $menu.Items.Add('仅保留选中项')
-$null = $menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator))
-$miPaste      = $menu.Items.Add('粘贴路径添加   Ctrl+V')
-$miSelectAll  = $menu.Items.Add('全选   Ctrl+A')
-$list.ContextMenuStrip = $menu
-
-# 主操作按钮（强调）
-$btnAdd = New-Object Windows.Forms.Button
-$btnAdd.Text = '开始添加标签'
-$btnAdd.Size = New-Object Drawing.Size(170, 40)
-$btnAdd.Font = New-Object Drawing.Font('Microsoft YaHei UI', 10.5, [Drawing.FontStyle]::Bold)
-$btnAdd.BackColor = [Drawing.Color]::FromArgb(0, 120, 212)
-$btnAdd.ForeColor = [Drawing.Color]::White
-$btnAdd.FlatStyle = 'Flat'
-$btnAdd.FlatAppearance.BorderSize = 0
-# 次要操作按钮（弱化）
-$btnScan   = New-Object Windows.Forms.Button
-$btnScan.Text = '体检扫描';   $btnScan.Size = New-Object Drawing.Size(80, 26)
-$btnScan.FlatStyle = 'Flat';  $btnScan.ForeColor = [Drawing.Color]::Gray
-$btnScan.FlatAppearance.BorderColor = [Drawing.Color]::LightGray
-$btnRemove = New-Object Windows.Forms.Button
-$btnRemove.Text = '移除标签'; $btnRemove.Size = New-Object Drawing.Size(80, 26)
-$btnRemove.FlatStyle = 'Flat'; $btnRemove.ForeColor = [Drawing.Color]::Gray
-$btnRemove.FlatAppearance.BorderColor = [Drawing.Color]::LightGray
-$btnExport = New-Object Windows.Forms.Button
-$btnExport.Text = '导出问题清单…'; $btnExport.Size = New-Object Drawing.Size(120, 26)
-$btnExport.FlatStyle = 'Flat'; $btnExport.ForeColor = [Drawing.Color]::Gray
-$btnExport.FlatAppearance.BorderColor = [Drawing.Color]::LightGray
-$btnAdd.Location    = New-Object Drawing.Point(12, 496);  $btnAdd.Anchor = 'Bottom,Left'
-$btnScan.Location   = New-Object Drawing.Point(200, 503); $btnScan.Anchor = 'Bottom,Left'
-$btnRemove.Location = New-Object Drawing.Point(288, 503); $btnRemove.Anchor = 'Bottom,Left'
-$btnExport.Location = New-Object Drawing.Point(752, 503); $btnExport.Anchor = 'Bottom,Right'
-
-$bar = New-Object Windows.Forms.ProgressBar
-$bar.Location = New-Object Drawing.Point(12, 540)
-$bar.Size = New-Object Drawing.Size(860, 14)
-$bar.Anchor = 'Bottom,Left,Right'
-
-$lblStatus = New-Object Windows.Forms.Label
-$lblStatus.Text = '就绪。请拖入文件或文件夹。'
-$lblStatus.Location = New-Object Drawing.Point(12, 560)
-$lblStatus.Size = New-Object Drawing.Size(860, 30)
-$lblStatus.Anchor = 'Bottom,Left,Right'
-
-$form.Controls.AddRange(@($lblHint,$btnFiles,$btnFolder,$btnClear,$btnSettings,$chkBackup,
-                          $list,$btnAdd,$btnScan,$btnRemove,$btnExport,$bar,$lblStatus))
 
 # ---------------- 列表管理 ----------------
 $script:Items = @{}   # 小写全路径 -> ListViewItem
+$script:FileOutcomes = @{}
 $script:Busy = $false
 $script:OpDone = $false
 $script:CountSummary = ''
 # 共享字体对象（避免每行新建 Font 占用 GDI 资源）
 $script:FontNormal = $list.Font
-$script:FontStrike = New-Object Drawing.Font($list.Font, [Drawing.FontStyle]::Strikeout)
+
 
 function Add-Paths([string[]]$paths) {
     if ($script:Busy) { return }
-    # 上一次操作已完成 -> 再次拖入/添加文件时自动清空列表, 开始新一批
-    if ($script:OpDone) {
-        $list.Items.Clear()
-        $script:Items = @{}
-        $script:OpDone = $false
-    }
+    # 新文件追加到当前列表，处理结果只在用户主动清空时移除。
+    $script:OpDone = $false
     $files = New-Object Collections.Generic.List[string]
     foreach ($p in $paths) {
         if (Test-Path -LiteralPath $p -PathType Container) {
@@ -222,6 +130,7 @@ function Add-Paths([string[]]$paths) {
             $it = New-Object Windows.Forms.ListViewItem([IO.Path]::GetFileName($f))
             $null = $it.SubItems.Add($type)
             $null = $it.SubItems.Add($STATUS_TEXT.pending)
+            $it.SubItems[2].Tag='pending'
             $null = $it.SubItems.Add([IO.Path]::GetDirectoryName($f))
             $it.Tag = $f
             $it.ToolTipText = $f
@@ -237,12 +146,15 @@ function Add-Paths([string[]]$paths) {
     [Windows.Forms.Application]::DoEvents()
     # 加入后立即回读一次, 让用户马上看到哪些已有标签(划删除线)
     if ($newFiles.Count -gt 0) { Update-TagStatus $newFiles }
+    elseif ($files.Count -gt 0) { $lblStatus.Text='所选文件已在列表中，无需重复添加。' }
+    else { $lblStatus.Text='没有找到支持的图片或视频文件。' }
 }
 
 function Update-TagStatus([string[]]$files) {
     # 只读不改: 标出 已打标签 / 未打标签 / 重复 / 读取失败
     if ($script:Busy -or $files.Count -eq 0) { return }
     $script:Busy = $true; Set-Buttons $false
+    $bar.Value=0; $bar.Maximum=[Math]::Max($files.Count,1); $ui.ProgressText.Text='检查中…'
     try {
         $subjMap = Get-Subjects $files
         $list.BeginUpdate()
@@ -250,6 +162,7 @@ function Update-TagStatus([string[]]$files) {
             $subj = $null
             if ($subjMap.ContainsKey($f.ToLower())) { $subj = $subjMap[$f.ToLower()] }
             Set-ItemStatus $f (Get-FileState $subj)
+            $bar.Value=[Math]::Min($bar.Value+1,$bar.Maximum)
         }
         $list.EndUpdate()
     } catch {
@@ -260,59 +173,88 @@ function Update-TagStatus([string[]]$files) {
         $script:Busy = $false; Set-Buttons $true
     }
     Update-Counts
-    $lblStatus.Text = "$script:CountSummary（划删除线 = 已有标签，无需处理）"
+    $lblStatus.Text = "检查完成。$script:CountSummary"
+    Update-FileDetails
 }
 
 function Set-ItemStatus([string]$file, [string]$state) {
-    $it = $script:Items[$file.ToLower()]
+    $key=$file.ToLowerInvariant()
+    $it=$script:Items[$key]
     if (-not $it) { return }
-    $it.SubItems[2].Text = $STATUS_TEXT[$state]
-    $reason = $script:LastFileErrors[$file.ToLowerInvariant()]
-    if (-not $reason) { $reason=$script:LastFileWarnings[$file.ToLowerInvariant()] }
-    $it.ToolTipText = $file + $(if ($reason) { "`n" + $reason } else { '' })
-    # 已有标签的文件: 划删除线 + 灰色, 一眼看出本次无需处理
-    $done = @('tagged','added','fixed_duplicate','skipped')
-    if ($state -in $done) { $it.Font = $script:FontStrike } else { $it.Font = $script:FontNormal }
-    if ($PROBLEM -contains $state -and $state -ne 'untagged') {
-        $it.ForeColor = [Drawing.Color]::Firebrick
-    } elseif ($state -eq 'untagged') {
-        $it.ForeColor = [Drawing.Color]::FromArgb(0, 90, 158)   # 待处理: 蓝色, 是本次要动的
-    } elseif ($state -in @('added','fixed_duplicate','removed')) {
-        $it.ForeColor = [Drawing.Color]::ForestGreen
-    } else {
-        $it.ForeColor = [Drawing.Color]::Gray                    # 已打标签/跳过: 灰
+    $it.SubItems[2].Tag=$state
+    if ($state -ne 'warning') { $script:FileOutcomes[$key]=$state }
+    $text=$STATUS_TEXT[$state]
+    if ($state -eq 'warning') {
+        $text=switch ($script:FileOutcomes[$key]) { 'removed' { '已移除 · 有警告' } 'fixed_duplicate' { '已去重 · 有警告' } default { '已添加 · 有警告' } }
     }
+    $it.SubItems[2].Text=$text
+    $it.Font=$script:FontNormal
+    $reason=$script:LastFileErrors[$key]
+    if (-not $reason) { $reason=$script:LastFileWarnings[$key] }
+    $it.ToolTipText=$file+$(if ($reason) { "`n"+$reason } else { '' })
+    if ($it.Selected) { Update-FileDetails }
 }
 
 function Get-ItemState($it) {
-    $txt = $it.SubItems[2].Text
-    foreach ($k in $STATUS_TEXT.Keys) { if ($STATUS_TEXT[$k] -eq $txt) { return $k } }
+    if ($it -and $it.SubItems.Count -gt 2 -and $it.SubItems[2].Tag) { return [string]$it.SubItems[2].Tag }
     return 'pending'
 }
 
+function Get-LogicalState($it) {
+    $state=Get-ItemState $it
+    if ($state -eq 'warning' -and $it -and $script:FileOutcomes.ContainsKey(([string]$it.Tag).ToLowerInvariant())) {
+        return $script:FileOutcomes[([string]$it.Tag).ToLowerInvariant()]
+    }
+    return $state
+}
+
+function Update-FileDetails {
+    if ($list.SelectedItems.Count -eq 0) {
+        $ui.DetailTitle.Text='文件详情'
+        $ui.DetailBody.Text=if ($list.Items.Count) { '选中一行，查看完整路径和处理结果。' } else { '添加文件后，选中一行查看完整路径和处理结果。' }
+        $ui.CopyDetails.Enabled=$false
+        return
+    }
+    if ($list.SelectedItems.Count -gt 1) {
+        $ui.DetailTitle.Text="已选中 $($list.SelectedItems.Count) 个文件"
+        $ui.DetailBody.Text='选择单个文件查看详细结果；右键可复制选中文件的路径。'
+        $ui.CopyDetails.Enabled=$false
+        return
+    }
+    $item=$list.SelectedItems[0]; $key=([string]$item.Tag).ToLowerInvariant()
+    $reason=$script:LastFileErrors[$key]
+    if (-not $reason) { $reason=$script:LastFileWarnings[$key] }
+    $ui.DetailTitle.Text=$item.Text+'  ·  '+$item.SubItems[2].Text
+    $ui.DetailBody.Text=[string]$item.Tag+$(if ($reason) { "`r`n"+$reason } else { '' })
+    $ui.CopyDetails.Enabled=$true
+}
+
 function Update-Counts {
-    # 主按钮上实时显示"本次真正会被写入的数量"
-    $total = $list.Items.Count
-    $todo = 0; $tagged = 0; $bad = 0
+    $total=$list.Items.Count; $todo=0; $tagged=0; $bad=0
     foreach ($it in $list.Items) {
-        switch (Get-ItemState $it) {
-            'untagged'  { $todo++ }
-            'duplicate' { $todo++ }
-            'pending'   { $todo++ }
-            'tagged'    { $tagged++ }
-            'added'     { $tagged++ }
-            'fixed_duplicate' { $tagged++ }
-            'skipped'   { $tagged++ }
-            'removed'   { $todo++ }
-            'unreadable' { $bad++ }
-            'failed'    { $bad++ }
-            'warning'   { $bad++ }
+        $state=Get-ItemState $it
+        if ($state -in @('duplicate','unreadable','failed','warning')) { $bad++ }
+        switch (Get-LogicalState $it) {
+            'untagged' { $todo++ } 'duplicate' { $todo++ } 'pending' { $todo++ } 'removed' { $todo++ }
+            'tagged' { $tagged++ } 'added' { $tagged++ } 'fixed_duplicate' { $tagged++ } 'skipped' { $tagged++ }
         }
     }
-    $btnAdd.Text = if ($todo -gt 0) { "开始添加标签 ($todo)" } else { '开始添加标签' }
-    $btnAdd.Enabled = ($todo -gt 0) -and (-not $script:Busy)
-    $script:CountSummary = "共 $total 个 — 待打标签 $todo，已有标签 $tagged" + $(if ($bad) { "，异常 $bad" } else { '' })
+    $btnAdd.Text=if ($todo) { "开始添加标签 · $todo" } else { '开始添加标签' }
+    $ui.TotalCount.Text="全部  $total"; $ui.PendingCount.Text="待添加  $todo"
+    $ui.TaggedCount.Text="已有标签  $tagged"; $ui.IssueCount.Text="需关注  $bad"
+    $ui.EmptyPanel.Visible=($total -eq 0)
+    $list.Visible=($total -gt 0)
+    if ($total -eq 0) { $ui.EmptyPanel.BringToFront() }
+    $script:CountSummary="共 $total 个 — 待打标签 $todo，已有标签 $tagged"+$(if ($bad) { "，异常 $bad" } else { '' })
+    Set-Buttons (-not $script:Busy)
+    Update-FileDetails
 }
+
+$list.Add_SelectedIndexChanged({ Update-FileDetails })
+$ui.CopyDetails.Add_Click({
+    if ($list.SelectedItems.Count -eq 1) { [Windows.Forms.Clipboard]::SetText($ui.DetailTitle.Text+"`r`n"+$ui.DetailBody.Text); $lblStatus.Text='已复制文件路径和处理结果。' }
+})
+$bar.Add_ValueChanged({ $ui.ProgressText.Text=if ($script:Busy) { "$($bar.Value) / $($bar.Maximum)" } else { '' } })
 
 function Add-FromClipboard {
     # 支持两种粘贴: 1) 在资源管理器里 Ctrl+C 复制的文件/文件夹  2) 纯文本路径(可多行)
@@ -336,7 +278,7 @@ function Remove-Selected {
     $n = $list.SelectedItems.Count
     $list.BeginUpdate()
     foreach ($it in @($list.SelectedItems)) {
-        $script:Items.Remove(([string]$it.Tag).ToLower())
+        $script:Items.Remove(([string]$it.Tag).ToLower()); $script:FileOutcomes.Remove(([string]$it.Tag).ToLower())
         $list.Items.Remove($it)
     }
     $list.EndUpdate()
@@ -345,10 +287,18 @@ function Remove-Selected {
 }
 
 # ---------------- 拖拽 ----------------
-$dragEnter = { param($s,$e) if ($e.Data.GetDataPresent([Windows.Forms.DataFormats]::FileDrop)) { $e.Effect = 'Copy' } }
+$dragEnter = { param($s,$e) if (-not $script:Busy -and $e.Data.GetDataPresent([Windows.Forms.DataFormats]::FileDrop)) { $e.Effect = 'Copy' } else { $e.Effect='None' } }
 $dragDrop  = { param($s,$e) Add-Paths ($e.Data.GetData([Windows.Forms.DataFormats]::FileDrop)) }
 $form.Add_DragEnter($dragEnter); $form.Add_DragDrop($dragDrop)
 $list.Add_DragEnter($dragEnter); $list.Add_DragDrop($dragDrop)
+$ui.EmptyPanel.Add_DragEnter($dragEnter); $ui.EmptyPanel.Add_DragDrop($dragDrop)
+$ui.EmptyText.Add_DragEnter($dragEnter); $ui.EmptyText.Add_DragDrop($dragDrop)
+$form.KeyPreview=$true
+$form.Add_KeyDown({
+    param($sender,$eventArgs)
+    if ($eventArgs.Control -and $eventArgs.KeyCode -eq 'V') { Add-FromClipboard; $eventArgs.Handled=$true; $eventArgs.SuppressKeyPress=$true }
+    elseif ($eventArgs.KeyCode -eq 'F5') { Update-TagStatus (Get-AllFiles); $eventArgs.Handled=$true; $eventArgs.SuppressKeyPress=$true }
+})
 
 # ---------------- 键盘快捷键 ----------------
 $list.Add_KeyDown({
@@ -391,7 +341,7 @@ $miKeepSel.Add_Click({
     $list.BeginUpdate()
     foreach ($it in @($list.Items)) {
         if (-not $keep.ContainsKey(([string]$it.Tag).ToLower())) {
-            $script:Items.Remove(([string]$it.Tag).ToLower())
+            $script:Items.Remove(([string]$it.Tag).ToLower()); $script:FileOutcomes.Remove(([string]$it.Tag).ToLower())
             $list.Items.Remove($it)
         }
     }
@@ -406,6 +356,8 @@ $menu.Add_Opening({
     $miOpenFolder.Enabled = $has; $miCopyPath.Enabled = $has
     $miRemoveSel.Enabled = $has -and (-not $script:Busy)
     $miKeepSel.Enabled = $has -and (-not $script:Busy)
+    $miPaste.Enabled = -not $script:Busy
+    $miSelectAll.Enabled = $list.Items.Count -gt 0
 })
 
 # ---------------- 点列头排序 ----------------
@@ -413,14 +365,16 @@ $script:SortCol = -1
 $script:SortAsc = $true
 $list.Add_ColumnClick({
     param($s,$e)
+    if ($script:Busy) { return }
     if ($script:SortCol -eq $e.Column) { $script:SortAsc = -not $script:SortAsc }
     else { $script:SortCol = $e.Column; $script:SortAsc = $true }
     $col = $e.Column; $asc = $script:SortAsc
+    $list.SortColumn=$col; $list.SortAscending=$asc
     $rows = @($list.Items) | Sort-Object -Property @{Expression={ $_.SubItems[$col].Text }} -Descending:(-not $asc)
     $list.BeginUpdate()
     $list.Items.Clear()
     foreach ($r in $rows) { $null = $list.Items.Add($r) }
-    $list.EndUpdate()
+    $list.EndUpdate(); $list.Invalidate(); Update-FileDetails
 })
 
 # ---------------- 按钮：加文件 ----------------
@@ -451,9 +405,10 @@ $btnFolder.Add_Click({
         }
     }
 })
+$btnPaste.Add_Click({ Add-FromClipboard })
 $btnClear.Add_Click({
     if (-not $script:Busy) {
-        $list.Items.Clear(); $script:Items = @{}
+        $list.Items.Clear(); $script:Items = @{}; $script:FileOutcomes=@{}
         Update-Counts
         $lblStatus.Text = '列表已清空。'
     }
@@ -461,7 +416,17 @@ $btnClear.Add_Click({
 
 # ---------------- 核心操作 ----------------
 function Set-Buttons([bool]$enabled) {
-    foreach ($b in @($btnAdd,$btnScan,$btnRemove,$btnFiles,$btnFolder,$btnClear,$btnSettings,$btnExport,$chkBackup)) { $b.Enabled = $enabled }
+    foreach ($button in @($btnFiles,$btnFolder,$btnPaste,$btnSettings,$chkBackup)) { $button.Enabled=$enabled }
+    $hasFiles=$list.Items.Count -gt 0
+    $pending=@($list.Items | Where-Object { (Get-LogicalState $_) -in @('pending','untagged','duplicate','removed') }).Count
+    $hasTags=@($list.Items | Where-Object { (Get-LogicalState $_) -in @('tagged','added','fixed_duplicate','skipped','duplicate') }).Count -gt 0
+    $hasProblems=@($list.Items | Where-Object { (Get-ItemState $_) -in $PROBLEM }).Count -gt 0
+    $btnClear.Enabled=$enabled -and $hasFiles
+    $btnAdd.Enabled=$enabled -and ($pending -gt 0)
+    $btnScan.Enabled=$enabled -and $hasFiles; $btnRemove.Enabled=$enabled -and $hasTags
+    $btnExport.Enabled=$enabled -and $hasProblems
+    $bar.Visible=-not $enabled
+    if ($enabled) { $ui.ProgressText.Text='' }
 }
 
 function Get-AllFiles { @($list.Items | ForEach-Object { $_.Tag }) }
@@ -473,6 +438,8 @@ function Invoke-Chunked([string[]]$files, [string]$mode, [string]$successState, 
         $result = Set-SafeFileTag -File $f -Mode $mode -KeepBackup $chkBackup.Checked
         $state = if ($result.Success) { $successState } else { 'failed' }
         if ($result.Success -and $result.Warning) {
+            $script:FileOutcomes[$f.ToLowerInvariant()]=$successState
+            $counts.Value[$successState]=1+$(if ($counts.Value.ContainsKey($successState)) { $counts.Value[$successState] } else { 0 })
             $state = 'warning'
             $script:LastFileErrors[$f.ToLowerInvariant()] = $result.Warning
         }
@@ -491,7 +458,7 @@ function Run-Action([string]$action) {
     }
     if ($action -eq 'add') {
         # 列表里已标出状态: 只对真正需要处理的文件弹确认, 全部已打标签则直接提示不打扰
-        $pending = @($list.Items | Where-Object { (Get-ItemState $_) -notin @('tagged','added','fixed_duplicate','skipped') })
+        $pending = @($list.Items | Where-Object { (Get-LogicalState $_) -in @('pending','untagged','duplicate','removed') })
         if ($pending.Count -eq 0) {
             [Windows.Forms.MessageBox]::Show(
                 "列表中的文件都已含标签，无需重复写入。",'无需处理','OK','Information') | Out-Null
@@ -587,10 +554,10 @@ function Run-Action([string]$action) {
         $script:Busy = $false; Set-Buttons $true
         Update-Counts
         if ($failures -or $warnings) {
-            [Windows.Forms.MessageBox]::Show("失败/读取异常 $failures 个，警告 $warnings 个。`n将鼠标停在异常行查看原因；可导出问题清单，或在设置中打包诊断日志。`n如提示恢复副本，请保留该目录。",'处理存在异常','OK','Warning') | Out-Null
+            [Windows.Forms.MessageBox]::Show("失败/读取异常 $failures 个，警告 $warnings 个。`n选中异常行查看原因；可导出问题清单，或在设置中打包诊断日志。`n如提示恢复副本，请保留该目录。",'处理存在异常','OK','Warning') | Out-Null
         }
         if (-not $script:RuntimeLogHealthy) { $lblStatus.Text += ' 日志无法写入，请查看设置。' }
-        $script:OpDone = $true   # 下次添加文件时自动清空列表
+        $script:OpDone = $true   # 保留结果，后续添加继续追加
     }
 }
 
@@ -600,8 +567,7 @@ $btnRemove.Add_Click({ Run-Action 'remove' })
 
 # ---------------- 导出问题清单 ----------------
 $btnExport.Add_Click({
-    $problemTexts = $PROBLEM | ForEach-Object { $STATUS_TEXT[$_] }
-    $rows = @($list.Items | Where-Object { $problemTexts -contains $_.SubItems[2].Text })
+    $rows = @($list.Items | Where-Object { (Get-ItemState $_) -in $PROBLEM })
     if ($rows.Count -eq 0) {
         [Windows.Forms.MessageBox]::Show('当前没有未打标签/重复/失败的文件。','提示','OK','Information') | Out-Null
         return
@@ -625,25 +591,14 @@ $btnExport.Add_Click({
 
 # ---------------- 设置与诊断 ----------------
 function New-SettingsDialog {
-    $settings = New-Object Windows.Forms.Form
-    $settings.Text = "SynthTag 设置 · v$AppVersion"
-    $settings.Size = New-Object Drawing.Size(620,350)
-    $settings.StartPosition = 'CenterParent'
-    $settings.Font = $form.Font
-    $settings.FormBorderStyle = 'FixedDialog'
-    $settings.MaximizeBox = $false; $settings.MinimizeBox = $false
-    $info = New-Object Windows.Forms.Label
-    $info.Location = New-Object Drawing.Point(18,18); $info.Size = New-Object Drawing.Size(570,170)
-    $health = if ($script:RuntimeLogHealthy) { '正常' } else { '异常：'+$script:LastLogError }
-    $info.Text = "SynthTag（打AI标签） v$AppVersion`nExifTool：$script:RuntimeExifToolVersion`n日志级别：INFO / WARNING / ERROR，保留近30天`n日志目录：$script:LogDirectory`n日志状态：$health`n`n诊断包包括版本、系统/存储环境、日志和问题清单。`n不包含图片或恢复副本；日志可能含文件名和共享路径，请确认后再分享。"
-    $openLogs = New-Object Windows.Forms.Button
-    $openLogs.Text = '打开日志目录'; $openLogs.Location = New-Object Drawing.Point(18,205); $openLogs.Size = New-Object Drawing.Size(130,32)
+    $view=New-SynthTagSettingsWindow -Version $AppVersion -EngineVersion $script:RuntimeExifToolVersion -LogDirectory $script:LogDirectory -Healthy $script:RuntimeLogHealthy -LogError $script:LastLogError
+    $settings=$view.Form; $settings.Icon=$form.Icon
+    $openLogs=$view.OpenLogs
     $openLogs.Add_Click({
         try { $null=[IO.Directory]::CreateDirectory($script:LogDirectory); Start-Process explorer.exe -ArgumentList ('"'+$script:LogDirectory+'"') }
         catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message,'无法打开','OK','Error') | Out-Null }
     })
-    $export = New-Object Windows.Forms.Button
-    $export.Text = '打包诊断压缩包…'; $export.Location = New-Object Drawing.Point(160,205); $export.Size = New-Object Drawing.Size(160,32)
+    $export=$view.Export
     $export.Add_Click({
         $dialog = New-Object Windows.Forms.SaveFileDialog
         $dialog.Filter = 'ZIP 诊断压缩包 (*.zip)|*.zip'
@@ -658,7 +613,6 @@ function New-SettingsDialog {
             [Windows.Forms.MessageBox]::Show($_.Exception.Message,'诊断包导出失败','OK','Error') | Out-Null
         } finally { $dialog.Dispose() }
     })
-    $settings.Controls.AddRange(@($info,$openLogs,$export))
     return $settings
 }
 
@@ -673,6 +627,7 @@ $form.Add_FormClosing({
     Write-AppLog -Level INFO -Message 'Application closed'
 })
 $form.Add_Shown({
+    if ($NoUI) { return }
     if (-not $script:RuntimeLogHealthy) { $lblStatus.Text='日志无法写入，请在设置中查看原因。' }
     $workRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SynthTag\Work'
     if ([IO.Directory]::Exists($workRoot)) {
@@ -683,4 +638,5 @@ $form.Add_Shown({
         }
     }
 })
+Update-Counts
 if (-not $NoUI) { $null = $form.ShowDialog() }

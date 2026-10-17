@@ -15,6 +15,7 @@ import time
 import unittest
 
 LAUNCHER = Path(sys.argv.pop(1)).resolve()
+VERSION = Path(__file__).resolve().parents[1].joinpath("VERSION").read_text(encoding="utf-8-sig").strip()
 spec = importlib.util.spec_from_file_location("make_payload", Path(__file__).with_name("make_payload.py"))
 packager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packager)
@@ -26,8 +27,8 @@ class PackagingTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = self.root / "source"
         self.source.mkdir()
-        for name in ("app.ps1", "runtime.ps1", "metadata.ps1", "VERSION"):
-            (self.source / name).write_text("1.1.0" if name == "VERSION" else "", encoding="utf-8")
+        for name in ("app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "VERSION"):
+            (self.source / name).write_text(VERSION if name == "VERSION" else "", encoding="utf-8")
         (self.source / "assets").mkdir()
         (self.source / "assets/SynthTag.ico").write_bytes(b"test icon")
         (self.source / "exiftool_bin").mkdir()
@@ -42,6 +43,11 @@ class PackagingTests(unittest.TestCase):
 
     def test_missing_runtime_rejects_build(self):
         (self.source / "runtime.ps1").unlink()
+        with self.assertRaises(FileNotFoundError):
+            packager.build_payload(self.source)
+
+    def test_missing_ui_module_rejects_build(self):
+        (self.source / "ui.ps1").unlink()
         with self.assertRaises(FileNotFoundError):
             packager.build_payload(self.source)
 
@@ -62,7 +68,7 @@ class PackagingTests(unittest.TestCase):
             "[IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'started.txt'), $PSScriptRoot)\n",
             encoding="ascii")
         payload, entries = packager.build_payload(self.source)
-        self.assertEqual({"app.ps1", "runtime.ps1", "metadata.ps1", "VERSION", "SynthTag.ico", "exiftool_bin/exiftool.exe",
+        self.assertEqual({"app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "VERSION", "SynthTag.ico", "exiftool_bin/exiftool.exe",
                           "exiftool_bin/exiftool_files/perl.exe", "exiftool_bin/exiftool_files/perl532.dll",
                           "exiftool_bin/exiftool_files/exiftool.pl", "exiftool_bin/exiftool_files/lib/Image/ExifTool.pm"},
                          {name for name, _ in entries})
@@ -86,14 +92,14 @@ class PackagingTests(unittest.TestCase):
             time.sleep(0.1)
         self.assertTrue(marker.exists(), "PowerShell application did not start")
         digest = hashlib.sha256(payload).hexdigest()
-        cache = local / f"SynthTag/Cache/1.1.0-{digest}"
+        cache = local / f"SynthTag/Cache/{VERSION}-{digest}"
         self.assertEqual(str(cache), marker.read_text())
         self.assertEqual(digest, (cache / "install.ver").read_text())
         self.assertFalse((logs / old_name).exists())
         self.assertTrue((logs / retained_name).exists())
         self.assertTrue((logs / "user.log").exists())
         current = logs / f"launcher-{date.today()}.log"
-        self.assertIn("[INFO] version=1.1.0 PowerShell started", current.read_text())
+        self.assertIn(f"[INFO] version={VERSION} PowerShell started", current.read_text())
         self.assertFalse((self.root / "launcher.log").exists())
 
 
