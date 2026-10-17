@@ -70,6 +70,22 @@ $btnSettings=$ui.Settings; $chkBackup=$ui.Backup
 $btnAdd=$ui.Add; $btnScan=$ui.Scan; $btnRemove=$ui.Remove; $btnExport=$ui.Export
 $menu=$ui.Menu; $miOpenFolder=$ui.OpenFolder; $miCopyPath=$ui.CopyPath
 $miRemoveSel=$ui.RemoveSelected; $miKeepSel=$ui.KeepSelected; $miPaste=$ui.PasteMenu; $miSelectAll=$ui.SelectAll
+$thumbnailLogTimer=New-Object Windows.Forms.Timer
+$thumbnailLogTimer.Interval=500
+$thumbnailLogTimer.Add_Tick({
+    foreach ($warning in $list.DrainThumbnailWarnings()) {
+        Write-AppLog -Level WARNING -Message 'Thumbnail unavailable' -Data @{ file=$warning[0]; reason=$warning[1] }
+        $key=$warning[0].ToLowerInvariant()
+        if ($script:Items -and $script:Items.ContainsKey($key) -and $list.GetThumbnailState($warning[0]) -eq 'failed') {
+            $item=$script:Items[$key]
+            $previewNote="`n缩略图不可用："+$warning[1]
+            if (-not $item.ToolTipText) { $item.ToolTipText=$warning[0] }
+            if (-not $item.ToolTipText.Contains($previewNote)) { $item.ToolTipText += $previewNote }
+        }
+    }
+})
+$thumbnailLogTimer.Start()
+$form.Add_Disposed({ $thumbnailLogTimer.Stop(); $thumbnailLogTimer.Dispose() })
 # 窗口/任务栏图标（单文件版解压到同目录，文件夹版在 assets\ 下）
 $script:AppIcon = $null
 foreach ($p in @((Join-Path $ScriptDir 'SynthTag.ico'), (Join-Path $ScriptDir 'assets\SynthTag.ico'))) {
@@ -148,6 +164,13 @@ function Add-Paths([string[]]$paths) {
     if ($newFiles.Count -gt 0) { Update-TagStatus $newFiles }
     elseif ($files.Count -gt 0) { $lblStatus.Text='所选文件已在列表中，无需重复添加。' }
     else { $lblStatus.Text='没有找到支持的图片或视频文件。' }
+}
+
+function Refresh-FileList {
+    if ($script:Busy) { return }
+    if (-not $list.PauseThumbnailLoading()) { $lblStatus.Text='缩略图读取尚未停止，请稍后重试。'; return }
+    try { $list.ClearThumbnails(); Update-TagStatus (Get-AllFiles) }
+    finally { $list.ResumeThumbnailLoading() }
 }
 
 function Update-TagStatus([string[]]$files) {
@@ -297,7 +320,7 @@ $form.KeyPreview=$true
 $form.Add_KeyDown({
     param($sender,$eventArgs)
     if ($eventArgs.Control -and $eventArgs.KeyCode -eq 'V') { Add-FromClipboard; $eventArgs.Handled=$true; $eventArgs.SuppressKeyPress=$true }
-    elseif ($eventArgs.KeyCode -eq 'F5') { Update-TagStatus (Get-AllFiles); $eventArgs.Handled=$true; $eventArgs.SuppressKeyPress=$true }
+    elseif ($eventArgs.KeyCode -eq 'F5') { Refresh-FileList; $eventArgs.Handled=$true; $eventArgs.SuppressKeyPress=$true }
 })
 
 # ---------------- 键盘快捷键 ----------------
@@ -313,7 +336,7 @@ $list.Add_KeyDown({
         Add-FromClipboard
         $e.Handled = $true; $e.SuppressKeyPress = $true
     } elseif ($e.KeyCode -eq 'F5') {
-        Update-TagStatus (Get-AllFiles)
+        Refresh-FileList
         $e.Handled = $true; $e.SuppressKeyPress = $true
     }
 })
@@ -408,6 +431,7 @@ $btnFolder.Add_Click({
 $btnPaste.Add_Click({ Add-FromClipboard })
 $btnClear.Add_Click({
     if (-not $script:Busy) {
+        $list.ClearThumbnails()
         $list.Items.Clear(); $script:Items = @{}; $script:FileOutcomes=@{}
         Update-Counts
         $lblStatus.Text = '列表已清空。'
@@ -432,6 +456,8 @@ function Set-Buttons([bool]$enabled) {
 function Get-AllFiles { @($list.Items | ForEach-Object { $_.Tag }) }
 
 function Invoke-Chunked([string[]]$files, [string]$mode, [string]$successState, [ref]$counts) {
+    if (-not $list.PauseThumbnailLoading()) { throw '缩略图读取尚未停止，请稍后重试。' }
+    try {
     foreach ($f in $files) {
         $lblStatus.Text = '正在处理：' + [IO.Path]::GetFileName($f)
         [Windows.Forms.Application]::DoEvents()
@@ -447,6 +473,7 @@ function Invoke-Chunked([string[]]$files, [string]$mode, [string]$successState, 
         Set-ItemStatus $f $state
         $bar.Value = [Math]::Min($bar.Value+1,$bar.Maximum)
     }
+    } finally { if (-not $script:Busy) { $list.ResumeThumbnailLoading() } }
 }
 
 function Run-Action([string]$action) {
@@ -475,6 +502,11 @@ function Run-Action([string]$action) {
         if ($r -ne 'OK') { return }
     }
 
+    if (-not $list.PauseThumbnailLoading()) {
+        Write-AppLog -Level ERROR -Message 'Could not stop thumbnail reader before batch'
+        $lblStatus.Text='缩略图读取尚未停止，请稍后重试。'
+        return
+    }
     Write-AppLog -Level INFO -Message 'Batch started' -Data @{ action=$action; count=$files.Count; backup=$chkBackup.Checked }
     $script:Busy = $true; Set-Buttons $false
     $bar.Value = 0; $bar.Maximum = [Math]::Max($files.Count, 1)
@@ -482,6 +514,7 @@ function Run-Action([string]$action) {
     [Windows.Forms.Application]::DoEvents()
 
     try {
+        if ($action -eq 'scan') { $list.ClearThumbnails() }
         # 第一步：整体读取现状（体检）
         $subjMap = Get-Subjects $files
         $states = @{}
@@ -552,6 +585,7 @@ function Run-Action([string]$action) {
         if ($warnings) { $lblStatus.Text += " 警告 $warnings。" }
         Write-AppLog -Level $(if ($failures) { 'ERROR' } elseif ($warnings) { 'WARNING' } else { 'INFO' }) -Message 'Batch finished' -Data @{ action=$action; summary=$lblStatus.Text; failures=$failures; warnings=$warnings }
         $script:Busy = $false; Set-Buttons $true
+        $list.ResumeThumbnailLoading()
         Update-Counts
         if ($failures -or $warnings) {
             [Windows.Forms.MessageBox]::Show("失败/读取异常 $failures 个，警告 $warnings 个。`n选中异常行查看原因；可导出问题清单，或在设置中打包诊断日志。`n如提示恢复副本，请保留该目录。",'处理存在异常','OK','Warning') | Out-Null

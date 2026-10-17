@@ -4,8 +4,8 @@
 1 ICON "../assets/SynthTag.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,2,0,0
- PRODUCTVERSION 1,2,0,0
+ FILEVERSION 1,3,0,0
+ PRODUCTVERSION 1,3,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0
  FILEOS 0x40004L
@@ -18,11 +18,11 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "SynthTag\0"
    VALUE "FileDescription", "SynthTag (AI Tagging)\0"
-   VALUE "FileVersion", "1.2.0\0"
+   VALUE "FileVersion", "1.3.0\0"
    VALUE "InternalName", "SynthTag\0"
    VALUE "OriginalFilename", "SynthTag.exe\0"
    VALUE "ProductName", "SynthTag\0"
-   VALUE "ProductVersion", "1.2.0\0"
+   VALUE "ProductVersion", "1.3.0\0"
   END
  END
  BLOCK "VarFileInfo"

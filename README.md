@@ -6,7 +6,8 @@
 
 ## 功能
 
-- 窗口标题显示 **SynthTag（打AI标签） v1.2.0**，浅色简洁界面
+- 窗口标题显示 **SynthTag（打AI标签） v1.3.0**，浅色简洁界面
+- 文件名前显示等比缩略图，后台按可见行加载；损坏或无解码器时显示占位图，不改变标签处理状态
 - 拖入文件或文件夹（递归子目录），批量写入合规标签
 - **加入即检测**：列表用文字和状态徽标区分待添加、已有标签和异常，主按钮实时显示待处理数量
 - 顶部显示全部 / 待添加 / 已有标签 / 需关注数量；选中一行即可查看、复制完整路径及异常原因
@@ -25,7 +26,7 @@
 | `Delete` / `Backspace` | 把选中项移出列表（不动文件本身） |
 | `Ctrl + V` | 粘贴添加：支持资源管理器里复制的文件/文件夹，或直接粘贴路径文本（可多行） |
 | `Ctrl + A` | 全选 |
-| `F5` | 重新检测标签状态 |
+| `F5` | 重新检测标签状态并刷新缩略图 |
 | 双击 | 在资源管理器中定位该文件 |
 | 右键 | 打开所在文件夹 / 复制路径 / 移除选中 / 仅保留选中 |
 | 点列头 | 按文件名、类型、状态、文件夹排序 |
@@ -36,7 +37,7 @@
 
 **方式一（推荐）**：下载 `SynthTag.exe`，双击即用。单文件免安装，首次运行自动解压内置组件（约 35MB）到本机缓存。
 
-**方式二**：克隆仓库后双击 `start.bat`（需 `app.ps1`、`ui.ps1`、`runtime.ps1`、`metadata.ps1`、`VERSION` 与 `exiftool_bin` 在同一目录）。
+**方式二**：克隆仓库后双击 `start.bat`（需 `app.ps1`、`ui.ps1`、`thumbnail-worker.ps1`、`runtime.ps1`、`metadata.ps1`、`VERSION` 与 `exiftool_bin` 在同一目录）。
 
 > 首次运行如遇 SmartScreen 提示，点「更多信息 → 仍要运行」。
 
@@ -87,6 +88,8 @@ Windows 回归测试：
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/metadata.tests.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/runtime.tests.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/app.tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/thumbnail-worker.tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests/thumbnails.tests.ps1 -StressCache
 zig cc -target x86_64-windows-gnu -O2 -DTEST_CLI '-Wl,--subsystem,console' -o build/launcher_test.exe build/launcher.c -lbcrypt
 python build/test_launcher.py build/launcher_test.exe
 python build/test_packaging.py launcher.exe
@@ -98,6 +101,7 @@ python build/test_packaging.py launcher.exe
 SynthTag.exe        单文件版（launcher + app.ps1 + ExifTool 自解压包）
 app.ps1             主程序（PowerShell + WinForms 图形界面）
 ui.ps1              窗口布局、现代控件与设置页
+thumbnail-worker.ps1 独立只读缩略图进程
 metadata.ps1        安全文件读写、校验、恢复流程
 runtime.ps1         本地日志、环境诊断、ZIP导出
 VERSION             应用版本

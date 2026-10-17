@@ -61,6 +61,12 @@ try {
     Assert-CountChip $ui.PendingCount 1 'Only the healthy image is pending.'
     Assert-CountChip $ui.TaggedCount 0 'No image has been tagged yet.'
     Assert-CountChip $ui.IssueCount 1 'Broken image must remain visible in issue count.'
+    $previewTimer=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        $list.Refresh(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 30
+        $previewState=$list.GetThumbnailState($path)
+    } while ($previewState -in @('pending','missing') -and $previewTimer.Elapsed.TotalSeconds -lt 20)
+    Assert ($previewState -eq 'ready') ('Healthy listed PNG lacks a real thumbnail: '+$previewState)
     Add-Paths @($path,$badPath)
     Assert ($list.Items.Count -eq 2 -and $lblStatus.Text -notmatch '正在' -and $lblStatus.Text -match '已在列表') 'Duplicate-only drop leaves a false processing indicator.'
     $brokenItem=$script:Items[$badPath.ToLowerInvariant()]
@@ -173,6 +179,7 @@ try {
     Assert $ui.EmptyPanel.Visible 'Clear action does not restore empty-state instructions.'
     Assert-CountChip $ui.TotalCount 0 'Clear action leaves a stale total count.'
     Assert-CountChip $ui.IssueCount 0 'Clear action leaves a stale issue count.'
+    Assert ($list.CachedThumbnailCount -eq 0) 'UI clear action retained thumbnail cache.'
     Assert ([IO.File]::Exists($path) -and [IO.File]::Exists($badPath) -and [IO.File]::Exists($backupPath+'_original')) 'Clearing the list must not delete source images or backups.'
     if ($RenderDirectory) {
         $render=New-Object Drawing.Bitmap($form.Width,$form.Height)

@@ -27,7 +27,7 @@ class PackagingTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = self.root / "source"
         self.source.mkdir()
-        for name in ("app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "VERSION"):
+        for name in ("app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "thumbnail-worker.ps1", "VERSION"):
             (self.source / name).write_text(VERSION if name == "VERSION" else "", encoding="utf-8")
         (self.source / "assets").mkdir()
         (self.source / "assets/SynthTag.ico").write_bytes(b"test icon")
@@ -51,6 +51,11 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             packager.build_payload(self.source)
 
+    def test_missing_thumbnail_worker_rejects_build(self):
+        (self.source / "thumbnail-worker.ps1").unlink()
+        with self.assertRaises(FileNotFoundError):
+            packager.build_payload(self.source)
+
     def test_missing_exiftool_dependency_rejects_build(self):
         for name in ("perl.exe", "perl532.dll", "exiftool.pl", "lib/Image/ExifTool.pm"):
             full = self.source / "exiftool_bin/exiftool_files" / name
@@ -68,7 +73,7 @@ class PackagingTests(unittest.TestCase):
             "[IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'started.txt'), $PSScriptRoot)\n",
             encoding="ascii")
         payload, entries = packager.build_payload(self.source)
-        self.assertEqual({"app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "VERSION", "SynthTag.ico", "exiftool_bin/exiftool.exe",
+        self.assertEqual({"app.ps1", "runtime.ps1", "metadata.ps1", "ui.ps1", "thumbnail-worker.ps1", "VERSION", "SynthTag.ico", "exiftool_bin/exiftool.exe",
                           "exiftool_bin/exiftool_files/perl.exe", "exiftool_bin/exiftool_files/perl532.dll",
                           "exiftool_bin/exiftool_files/exiftool.pl", "exiftool_bin/exiftool_files/lib/Image/ExifTool.pm"},
                          {name for name, _ in entries})

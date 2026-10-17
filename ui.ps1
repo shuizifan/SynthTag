@@ -5,7 +5,138 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Threading;
 namespace SynthTag {
+    // All source I/O belongs to a killable child process; UI painting only reads small memory bitmaps.
+    public sealed class ThumbnailCache : IDisposable {
+        sealed class Entry { public Bitmap Image; public string State; public LinkedListNode<string> Node; }
+        readonly object gate=new object(), processGate=new object();
+        readonly Dictionary<string,Entry> cache=new Dictionary<string,Entry>(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string,int> pending=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
+        readonly LinkedList<string> order=new LinkedList<string>(), jobs=new LinkedList<string>();
+        readonly Queue<string[]> warnings=new Queue<string[]>();
+        readonly AutoResetEvent wake=new AutoResetEvent(false);
+        readonly Control owner; readonly Thread thread;
+        Process process; string tempDirectory; bool paused,disposed; int generation;
+        public string WorkerScript { get; set; }
+        public ThumbnailCache(Control control) { owner=control; thread=new Thread(Work); thread.IsBackground=true; thread.Name="SynthTag thumbnails"; thread.Start(); }
+        public int Count { get { lock(gate) return cache.Count; } }
+        public string State(string path) { lock(gate) { Entry e; if(cache.TryGetValue(path,out e)) return e.State; return pending.ContainsKey(path)?"pending":"missing"; } }
+        public Bitmap Copy(string path) { lock(gate) { Entry e; return cache.TryGetValue(path,out e)&&e.Image!=null?(Bitmap)e.Image.Clone():null; } }
+        public string[][] DrainWarnings() { lock(gate) { var result=warnings.ToArray(); warnings.Clear(); return result; } }
+        void Put(string path,Bitmap image,string state) {
+            Entry old; if(cache.TryGetValue(path,out old)) { order.Remove(old.Node); if(old.Image!=null) old.Image.Dispose(); }
+            cache[path]=new Entry { Image=image, State=state, Node=order.AddLast(path) };
+            while(cache.Count>256) { string first=order.First.Value; Entry e=cache[first]; order.RemoveFirst(); cache.Remove(first); if(e.Image!=null)e.Image.Dispose(); }
+        }
+        public void Draw(Graphics graphics,string path,Rectangle bounds,bool unreadable) {
+            string state="missing";
+            lock(gate) {
+                if(disposed) return;
+                Entry e;
+                if(cache.TryGetValue(path,out e)) {
+                    order.Remove(e.Node); e.Node=order.AddLast(path); state=e.State;
+                    if(e.Image!=null && !unreadable) { graphics.DrawImageUnscaled(e.Image,bounds.Location); return; }
+                } else if(!pending.ContainsKey(path) && !paused) {
+                    string ext=Path.GetExtension(path).ToLowerInvariant();
+                    if(ext!=".png"&&ext!=".jpg"&&ext!=".jpeg"&&ext!=".tif"&&ext!=".tiff"&&ext!=".webp"&&ext!=".bmp"&&ext!=".gif") { Put(path,null,"unsupported"); state="unsupported"; }
+                    else if(unreadable) { Put(path,null,"failed"); state="failed"; }
+                    else if(pending.Count<32) { pending[path]=generation; jobs.AddLast(path); wake.Set(); }
+                }
+            }
+            graphics.SmoothingMode=SmoothingMode.AntiAlias;
+            using(var shape=UiDrawing.Rounded(bounds,6)) using(var b=new SolidBrush(Color.FromArgb(239,243,248))) graphics.FillPath(b,shape);
+            TextRenderer.DrawText(graphics,(unreadable||state=="failed")?"!":(state=="unsupported"?"—":"图"),owner.Font,bounds,Color.FromArgb(148,163,184),TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);
+        }
+        void Refresh() { try { if(owner.IsHandleCreated&&!owner.IsDisposed) owner.BeginInvoke(new Action(delegate { if(!owner.IsDisposed) owner.Invalidate(); })); } catch(InvalidOperationException) {} }
+        Process GetProcess(int token) {
+            lock(processGate) {
+                lock(gate) { if(paused||disposed||token!=generation) return null; }
+                if(process!=null&&!process.HasExited) return process;
+                StopProcess();
+                string root=Environment.GetEnvironmentVariable("LOCALAPPDATA");
+                if(String.IsNullOrEmpty(root)) root=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                tempDirectory=Path.Combine(root,"SynthTag","ThumbnailWork",Guid.NewGuid().ToString("N")); Directory.CreateDirectory(tempDirectory);
+                var info=new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),@"WindowsPowerShell\v1.0\powershell.exe"));
+                info.Arguments="-NoProfile -NonInteractive -ExecutionPolicy Bypass -STA -File \""+WorkerScript+"\" -Worker -TempDirectory \""+tempDirectory+"\"";
+                info.UseShellExecute=false; info.CreateNoWindow=true; info.RedirectStandardInput=true; info.RedirectStandardOutput=true; info.RedirectStandardError=true;
+                process=new Process(); process.StartInfo=info; process.Start(); process.ErrorDataReceived+=delegate {}; process.BeginErrorReadLine(); return process;
+            }
+        }
+        bool StopProcess() {
+            // Caller holds processGate; never wait while holding the bitmap/cache lock.
+            if(process!=null) {
+                try { if(!process.HasExited) { process.Kill(); if(!process.WaitForExit(2000)) return false; } } catch(InvalidOperationException) {} catch { return false; }
+                process.Dispose(); process=null;
+            }
+            if(tempDirectory!=null) {
+                try {
+                    if(Directory.Exists(tempDirectory) && (File.GetAttributes(tempDirectory)&FileAttributes.ReparsePoint)==0) {
+                        foreach(string file in Directory.GetFiles(tempDirectory)) if((File.GetAttributes(file)&FileAttributes.ReparsePoint)==0) File.Delete(file);
+                        Directory.Delete(tempDirectory,false);
+                    }
+                } catch(IOException) {} catch(UnauthorizedAccessException) {}
+                tempDirectory=null;
+            }
+            return true;
+        }
+        void Work() {
+            while(true) {
+                string path=null; int token=0;
+                lock(gate) { if(disposed) return; if(!paused&&jobs.Count>0) { path=jobs.Last.Value; jobs.RemoveLast(); token=pending[path]; } }
+                if(path==null) { wake.WaitOne(); continue; }
+                Bitmap result=null; string state="failed",error="缩略图不可用。";
+                try {
+                    Process child=GetProcess(token);
+                    if(child!=null) {
+                        child.StandardInput.WriteLine(Convert.ToBase64String(Encoding.UTF8.GetBytes(path))); child.StandardInput.Flush();
+                        var response=child.StandardOutput.ReadLineAsync();
+                        if(!response.Wait(8000)) { error="缩略图读取超时（8 秒）。"; lock(processGate) StopProcess(); }
+                        else {
+                            string line=response.Result;
+                            if(line!=null&&line.StartsWith("ERROR|")&&line.Length<65536) error=Encoding.UTF8.GetString(Convert.FromBase64String(line.Substring(6)));
+                            if(line!=null&&line.StartsWith("OK|")&&line.Length<65536) {
+                                using(var stream=new MemoryStream(Convert.FromBase64String(line.Substring(3))))
+                                using(var image=Image.FromStream(stream)) {
+                                    if(image.Width>40||image.Height>40) throw new InvalidDataException("Oversized preview.");
+                                    result=new Bitmap(image); state="ready";
+                                }
+                            }
+                        }
+                    }
+                } catch(Exception ex) { error=ex.GetBaseException().Message; lock(processGate) StopProcess(); }
+                lock(gate) {
+                    int existing;
+                    if(!disposed && token==generation && pending.TryGetValue(path,out existing)&&existing==token) {
+                        pending.Remove(path); Put(path,result,state); result=null;
+                        if(state=="failed") { if(warnings.Count==64)warnings.Dequeue(); warnings.Enqueue(new[]{path,error}); }
+                    }
+                }
+                if(result!=null)result.Dispose(); Refresh();
+            }
+        }
+        public bool Pause() {
+            lock(processGate) {
+                lock(gate) { paused=true; generation++; pending.Clear(); jobs.Clear(); }
+                return StopProcess();
+            }
+        }
+        public void Resume() { lock(gate) { if(disposed)return; paused=false; wake.Set(); } Refresh(); }
+        public void Clear() {
+            bool wasPaused; lock(gate) wasPaused=paused;
+            Pause();
+            lock(gate) { foreach(var e in cache.Values) if(e.Image!=null)e.Image.Dispose(); cache.Clear(); order.Clear(); warnings.Clear(); }
+            if(!wasPaused)Resume();
+        }
+        public void Dispose() {
+            lock(gate) { if(disposed)return; disposed=true; }
+            Pause(); lock(gate) { foreach(var e in cache.Values)if(e.Image!=null)e.Image.Dispose(); cache.Clear(); order.Clear(); wake.Set(); }
+        }
+    }
     public static class UiDrawing {
         public static GraphicsPath Rounded(Rectangle r, int radius) {
             var p=new GraphicsPath(); int d=Math.Min(radius*2,Math.Min(r.Width,r.Height));
@@ -60,9 +191,20 @@ namespace SynthTag {
         }
     }
     public class ModernList : ListView {
+        readonly ThumbnailCache thumbnails;
+        public string ThumbnailWorkerScript { get { return thumbnails.WorkerScript; } set { thumbnails.WorkerScript=value; } }
+        public int CachedThumbnailCount { get { return thumbnails.Count; } }
+        public string GetThumbnailState(string path) { return thumbnails.State(path); }
+        public Bitmap GetThumbnailCopy(string path) { return thumbnails.Copy(path); }
+        public string[][] DrainThumbnailWarnings() { return thumbnails.DrainWarnings(); }
+        public bool PauseThumbnailLoading() { return thumbnails.Pause(); }
+        public void ResumeThumbnailLoading() { thumbnails.Resume(); }
+        public void ClearThumbnails() { thumbnails.Clear(); }
+        protected override void Dispose(bool disposing) { if(disposing)thumbnails.Dispose(); base.Dispose(disposing); }
         public int SortColumn { get; set; }
         public bool SortAscending { get; set; }
         public ModernList() {
+            thumbnails=new ThumbnailCache(this);
             DoubleBuffered=true; OwnerDraw=true; View=View.Details; FullRowSelect=true;
             HideSelection=false; BorderStyle=BorderStyle.None; BackColor=Color.White;
             ShowItemToolTips=true; SortColumn=-1;
@@ -91,12 +233,17 @@ namespace SynthTag {
                 if(state=="duplicate"||state=="warning") { fg=Color.FromArgb(161,98,7); tint=Color.FromArgb(255,251,235); }
                 if(state=="failed"||state=="unreadable") { fg=Color.FromArgb(185,28,28); tint=Color.FromArgb(254,242,242); }
                 int width=Math.Min(e.Bounds.Width-14,TextRenderer.MeasureText(e.SubItem.Text,Font).Width+15);
-                var r=new Rectangle(e.Bounds.Left+8,e.Bounds.Top+6,width,Math.Max(20,e.Bounds.Height-12));
+                var r=new Rectangle(e.Bounds.Left+8,e.Bounds.Top+(e.Bounds.Height-24)/2,width,24);
                 e.Graphics.SmoothingMode=SmoothingMode.AntiAlias;
                 using(var p=UiDrawing.Rounded(r,5)) using(var b=new SolidBrush(tint)) e.Graphics.FillPath(b,p);
                 TextRenderer.DrawText(e.Graphics,e.SubItem.Text,Font,r,fg,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis);
             } else {
                 var r=e.Bounds; r.X+=12; r.Width-=20;
+                if(e.ColumnIndex==0) {
+                    string path=e.Item.Tag as string;
+                    if(!String.IsNullOrEmpty(path)) thumbnails.Draw(e.Graphics,path,new Rectangle(e.Bounds.Left+10,e.Bounds.Top+(e.Bounds.Height-40)/2,40,40),e.Item.SubItems[2].Tag as string=="unreadable");
+                    r.X+=52; r.Width=Math.Max(0,r.Width-52);
+                }
                 Color fg=e.ColumnIndex==0?Color.FromArgb(30,41,59):Color.FromArgb(100,116,139);
                 TextRenderer.DrawText(e.Graphics,e.SubItem.Text,Font,r,fg,TextFormatFlags.Left|TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix);
             }
@@ -166,7 +313,8 @@ function New-SynthTagWindow([string]$Version) {
     $card=New-Object SynthTag.ModernCard; $card.Dock='Fill'; $card.Margin=New-Object Windows.Forms.Padding(0,0,0,10); $card.Padding=New-Object Windows.Forms.Padding(1)
     $list=New-Object SynthTag.ModernList; $list.Dock='Fill'; $list.AllowDrop=$true
     $null=$list.Columns.Add('文件名',300); $null=$list.Columns.Add('类型',68); $null=$list.Columns.Add('标签状态',156); $null=$list.Columns.Add('所在文件夹',460)
-    $rowImages=New-Object Windows.Forms.ImageList; $rowImages.ImageSize=New-Object Drawing.Size(1,36); $list.SmallImageList=$rowImages
+    $list.ThumbnailWorkerScript=Join-Path $PSScriptRoot 'thumbnail-worker.ps1'
+    $rowImages=New-Object Windows.Forms.ImageList; $rowImages.ImageSize=New-Object Drawing.Size(1,56); $list.SmallImageList=$rowImages
     $list.Add_Disposed({ if ($this.SmallImageList) { $this.SmallImageList.Dispose() } })
     $list.Add_ClientSizeChanged({
         param($sender,$eventArgs)
