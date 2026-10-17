@@ -33,24 +33,23 @@ namespace SynthTag {
             cache[path]=new Entry { Image=image, State=state, Node=order.AddLast(path) };
             while(cache.Count>256) { string first=order.First.Value; Entry e=cache[first]; order.RemoveFirst(); cache.Remove(first); if(e.Image!=null)e.Image.Dispose(); }
         }
-        public void Draw(Graphics graphics,string path,Rectangle bounds,bool unreadable) {
+        public void Draw(Graphics graphics,string path,Rectangle bounds) {
             string state="missing";
             lock(gate) {
                 if(disposed) return;
                 Entry e;
                 if(cache.TryGetValue(path,out e)) {
                     order.Remove(e.Node); e.Node=order.AddLast(path); state=e.State;
-                    if(e.Image!=null && !unreadable) { graphics.DrawImageUnscaled(e.Image,bounds.Location); return; }
+                    if(e.Image!=null) { graphics.DrawImageUnscaled(e.Image,bounds.Location); return; }
                 } else if(!pending.ContainsKey(path) && !paused) {
                     string ext=Path.GetExtension(path).ToLowerInvariant();
                     if(ext!=".png"&&ext!=".jpg"&&ext!=".jpeg"&&ext!=".tif"&&ext!=".tiff"&&ext!=".webp"&&ext!=".bmp"&&ext!=".gif") { Put(path,null,"unsupported"); state="unsupported"; }
-                    else if(unreadable) { Put(path,null,"failed"); state="failed"; }
                     else if(pending.Count<32) { pending[path]=generation; jobs.AddLast(path); wake.Set(); }
                 }
             }
             graphics.SmoothingMode=SmoothingMode.AntiAlias;
             using(var shape=UiDrawing.Rounded(bounds,6)) using(var b=new SolidBrush(Color.FromArgb(239,243,248))) graphics.FillPath(b,shape);
-            TextRenderer.DrawText(graphics,(unreadable||state=="failed")?"!":(state=="unsupported"?"—":"图"),owner.Font,bounds,Color.FromArgb(148,163,184),TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(graphics,state=="failed"?"!":(state=="unsupported"?"—":"图"),owner.Font,bounds,Color.FromArgb(148,163,184),TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);
         }
         void Refresh() { try { if(owner.IsHandleCreated&&!owner.IsDisposed) owner.BeginInvoke(new Action(delegate { if(!owner.IsDisposed) owner.Invalidate(); })); } catch(InvalidOperationException) {} }
         Process GetProcess(int token) {
@@ -207,7 +206,7 @@ namespace SynthTag {
             thumbnails=new ThumbnailCache(this);
             DoubleBuffered=true; OwnerDraw=true; View=View.Details; FullRowSelect=true;
             HideSelection=false; BorderStyle=BorderStyle.None; BackColor=Color.White;
-            ShowItemToolTips=true; SortColumn=-1;
+            ShowItemToolTips=false; SortColumn=-1;
         }
         protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e) {
             e.Graphics.FillRectangle(Brushes.White,e.Bounds);
@@ -241,7 +240,7 @@ namespace SynthTag {
                 var r=e.Bounds; r.X+=12; r.Width-=20;
                 if(e.ColumnIndex==0) {
                     string path=e.Item.Tag as string;
-                    if(!String.IsNullOrEmpty(path)) thumbnails.Draw(e.Graphics,path,new Rectangle(e.Bounds.Left+10,e.Bounds.Top+(e.Bounds.Height-40)/2,40,40),e.Item.SubItems[2].Tag as string=="unreadable");
+                    if(!String.IsNullOrEmpty(path)) thumbnails.Draw(e.Graphics,path,new Rectangle(e.Bounds.Left+10,e.Bounds.Top+(e.Bounds.Height-40)/2,40,40));
                     r.X+=52; r.Width=Math.Max(0,r.Width-52);
                 }
                 Color fg=e.ColumnIndex==0?Color.FromArgb(30,41,59):Color.FromArgb(100,116,139);
@@ -312,7 +311,7 @@ function New-SynthTagWindow([string]$Version) {
     $root.Controls.Add($summary,0,2)
     $card=New-Object SynthTag.ModernCard; $card.Dock='Fill'; $card.Margin=New-Object Windows.Forms.Padding(0,0,0,10); $card.Padding=New-Object Windows.Forms.Padding(1)
     $list=New-Object SynthTag.ModernList; $list.Dock='Fill'; $list.AllowDrop=$true
-    $null=$list.Columns.Add('文件名',300); $null=$list.Columns.Add('类型',68); $null=$list.Columns.Add('标签状态',156); $null=$list.Columns.Add('所在文件夹',460)
+    $null=$list.Columns.Add('文件名',300); $null=$list.Columns.Add('类型',68); $null=$list.Columns.Add('处理状态',156); $null=$list.Columns.Add('所在文件夹',460)
     $list.ThumbnailWorkerScript=Join-Path $PSScriptRoot 'thumbnail-worker.ps1'
     $rowImages=New-Object Windows.Forms.ImageList; $rowImages.ImageSize=New-Object Drawing.Size(1,56); $list.SmallImageList=$rowImages
     $list.Add_Disposed({ if ($this.SmallImageList) { $this.SmallImageList.Dispose() } })
@@ -368,7 +367,7 @@ function New-SynthTagWindow([string]$Version) {
     $tips.SetToolTip($clear,'仅清空当前列表，不删除任何文件。')
     $tips.SetToolTip($backup,'写入前保留一个带 _original 后缀的原始文件备份。')
     $tips.SetToolTip($scan,'重新检查标签和文件状态，不修改文件。')
-    $tips.SetToolTip($counts.IssueCount,'包含重复、读取失败、处理失败或已完成但有警告的文件；可能与其他计数重叠。')
+    $tips.SetToolTip($counts.IssueCount,'包含重复、文件检查异常、处理失败或已完成但有警告的文件；可能与其他计数重叠。')
     $form.Tag=@{ ToolTip=$tips }
     $form.Add_Disposed({ if ($this.Tag.ToolTip) { $this.Tag.ToolTip.Dispose() } })
     return [pscustomobject]@{

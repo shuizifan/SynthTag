@@ -32,6 +32,7 @@ try {
         Assert ($null -ne $ui.$controlName) ('Main interface is missing '+$controlName+'.')
     }
     Assert ($btnSettings.Enabled -and [bool]$btnSettings.Text) 'Settings entry is unavailable.'
+    Assert (-not $list.ShowItemToolTips) 'Long row tooltips must stay disabled so they do not obscure the file list.'
     # Show briefly so native ListView selection and Visible properties reflect
     # real WinForms behavior. -NoUI suppresses startup recovery dialogs.
     $form.ShowInTaskbar=$false
@@ -55,6 +56,7 @@ try {
     Assert ($list.Items.Count -eq 2) 'Both fixture paths must appear.'
     Assert ((Get-ItemState $script:Items[$path.ToLowerInvariant()]) -eq 'untagged') 'Valid PNG must be pending tag.'
     Assert ((Get-ItemState $script:Items[$badPath.ToLowerInvariant()]) -eq 'unreadable') 'Broken PNG must show read failure.'
+    Assert ($script:Items[$badPath.ToLowerInvariant()].SubItems[2].Text -eq '文件检查异常') 'File validation failure is mislabeled as a thumbnail read failure.'
     Assert ($script:Items[$badPath.ToLowerInvariant()].ToolTipText -match 'empty|空') 'Failure tooltip lacks actual reason.'
     Assert (-not $ui.EmptyPanel.Visible) 'Empty-state instructions obscure the populated list.'
     Assert-CountChip $ui.TotalCount 2 'Total must count both fixtures.'
@@ -76,7 +78,13 @@ try {
     $details=$ui.DetailTitle.Text+' '+$ui.DetailBody.Text
     Assert ($details -match [regex]::Escape([IO.Path]::GetFileName($badPath))) 'Selection details omit the affected filename.'
     Assert ($details -match 'empty|空') 'Selection details omit the actual error reason.'
+    Assert ($details -match '文件.*(读取|校验)' -and $details -match '不代表缩略图加载失败') 'File-check explanation must distinguish file/tag validation from preview loading.'
+    $originalDiagnostic=$script:LastFileErrors[$badPath.ToLowerInvariant()]
+    Assert ($details.Contains($originalDiagnostic)) 'Chinese explanation discarded the original diagnostic text.'
     Assert $ui.CopyDetails.Enabled 'Detailed error cannot be copied.'
+    # The enabled Copy Details action uses these same title/body values; leave
+    # the user's global Windows clipboard untouched during automated tests.
+    Assert ($ui.DetailTitle.Text.Contains('文件检查异常') -and $ui.DetailBody.Text.Contains($originalDiagnostic) -and $ui.DetailBody.Text.Contains('不代表缩略图加载失败')) 'Copy-ready details omit the Chinese explanation or original diagnostic.'
     # Display copy can change without changing the logical processing state.
     $displayText=$brokenItem.SubItems[2].Text
     $brokenItem.SubItems[2].Text='测试显示文本'

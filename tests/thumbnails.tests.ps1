@@ -86,6 +86,7 @@ try {
         Assert ($null -ne $list.PSObject.Methods[$method]) ('Preview contract is missing '+$method+'.')
     }
     Assert ($null -ne $list.PSObject.Properties['CachedThumbnailCount']) 'Preview cache count is unavailable.'
+    Assert (-not $list.ShowItemToolTips) 'Thumbnail rows must not enable long floating file diagnostics.'
     $landscape=New-ColorFixture '横向 红色[01].png' 80 40 ([Drawing.Color]::Red)
     $portrait=New-ColorFixture '纵向 蓝色[02].jpg' 40 80 ([Drawing.Color]::Blue) 'jpeg'
     $broken=Join-Path $fixtureRoot '损坏预览.png'; [IO.File]::WriteAllBytes($broken,[byte[]]@())
@@ -112,6 +113,18 @@ try {
     }
     Assert ($list.CachedThumbnailCount -ge 2 -and $list.CachedThumbnailCount -le 256) 'Preview cache count is outside its bound.'
     Write-Output 'PASS: visible PNG/JPEG color, aspect ratio, placeholders, processing state, original bytes and released source handles.'
+    $metadataIssue=New-ColorFixture '可解码但文件检查异常.png' 80 40 ([Drawing.Color]::Blue)
+    $metadataHash=(Get-FileHash -LiteralPath $metadataIssue -Algorithm SHA256).Hash
+    $script:LastFileErrors[$metadataIssue.ToLowerInvariant()]='Original metadata validation diagnostic remains unchanged.'
+    $metadataRow=Add-PreviewRow $metadataIssue 'unreadable'
+    $list.Items.Remove($metadataRow); $null=$list.Items.Insert(0,$metadataRow)
+    Update-Counts
+    Assert ((Wait-Preview $metadataIssue @('ready')) -eq 'ready') 'File-validation status incorrectly prevented an actually decodable image preview.'
+    Assert-ColorAndAspect $metadataIssue 'blue' 2.0
+    Assert ((Get-ItemState $metadataRow) -eq 'unreadable' -and $metadataRow.SubItems[2].Text -eq '文件检查异常') 'A successful preview erased the independent file-validation state.'
+    Assert ((Get-FileHash -LiteralPath $metadataIssue -Algorithm SHA256).Hash -eq $metadataHash) 'Previewing a validation-failed row changed the source image.'
+    Assert-ExclusiveOpen $metadataIssue
+    Write-Output 'PASS: a genuinely decodable image previews even with an independent file-validation error; source and processing state remain unchanged.'
     if ($RenderDirectory) {
         $null=[IO.Directory]::CreateDirectory($RenderDirectory)
         $list.Items[0].EnsureVisible(); Pump-Previews 100
@@ -197,6 +210,8 @@ while ($null -ne ($line=[Console]::ReadLine())) {
         $timeoutPath=New-ColorFixture '八秒超时源.png' 80 40 ([Drawing.Color]::Red)
         $timeoutRow=Add-PreviewRow $timeoutPath
         $timeoutRow.ToolTipText=$timeoutPath+"`n原标签诊断必须保留"
+        $originalTooltip=$timeoutRow.ToolTipText
+        $script:LastFileWarnings[$timeoutPath.ToLowerInvariant()]='原标签诊断必须保留'
         $list.ResumeThumbnailLoading(); $list.Refresh()
         Wait-SlowReader $timeoutPath
         $timeoutTimer=[Diagnostics.Stopwatch]::StartNew()
@@ -205,7 +220,10 @@ while ($null -ne ($line=[Console]::ReadLine())) {
         Assert-ExclusiveOpen $timeoutPath
         Assert ((Get-ItemState $script:Items[$timeoutPath.ToLowerInvariant()]) -eq 'untagged') 'Thumbnail timeout changed tag-processing state.'
         Pump-Previews 600
-        Assert ($timeoutRow.ToolTipText.Contains('原标签诊断必须保留') -and $timeoutRow.ToolTipText.Contains('缩略图不可用')) 'Preview timeout replaced the existing tag diagnostic tooltip.'
+        Assert ($timeoutRow.ToolTipText -eq $originalTooltip) 'Preview timeout mutated the disabled row tooltip.'
+        $list.SelectedItems.Clear(); $timeoutRow.Selected=$true; $timeoutRow.Focused=$true
+        [Windows.Forms.Application]::DoEvents()
+        Assert ($ui.DetailBody.Text.Contains('原标签诊断必须保留') -and $ui.DetailBody.Text.Contains('缩略图暂不可用')) 'Preview timeout details omit the original tag diagnostic or independent preview explanation.'
         $logRecords=@(Get-ChildItem -LiteralPath $script:LogDirectory -Filter '*.jsonl' | Get-Content -Encoding UTF8 | ForEach-Object { $_ | ConvertFrom-Json })
         Assert (@($logRecords | Where-Object { $_.level -eq 'WARNING' -and $_.message -eq 'Thumbnail unavailable' -and $_.data.reason -match '8|超时' }).Count -gt 0) 'Preview timeout did not reach the application WARNING log.'
         $list.ThumbnailWorkerScript=$realWorker

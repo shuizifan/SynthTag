@@ -53,7 +53,7 @@ if (-not (Test-Path $ExifTool)) {
 
 $STATUS_TEXT = @{
     pending='待检查'; tagged='已有标签'; untagged='待添加'
-    duplicate='标签重复'; unreadable='读取失败'; added='添加成功'
+    duplicate='标签重复'; unreadable='文件检查异常'; added='添加成功'
     warning='已完成 · 有警告'; fixed_duplicate='已去重'; skipped='已跳过'; removed='已移除'; failed='处理失败'
 }
 $PROBLEM = @('untagged','duplicate','unreadable','failed','warning')
@@ -76,12 +76,7 @@ $thumbnailLogTimer.Add_Tick({
     foreach ($warning in $list.DrainThumbnailWarnings()) {
         Write-AppLog -Level WARNING -Message 'Thumbnail unavailable' -Data @{ file=$warning[0]; reason=$warning[1] }
         $key=$warning[0].ToLowerInvariant()
-        if ($script:Items -and $script:Items.ContainsKey($key) -and $list.GetThumbnailState($warning[0]) -eq 'failed') {
-            $item=$script:Items[$key]
-            $previewNote="`n缩略图不可用："+$warning[1]
-            if (-not $item.ToolTipText) { $item.ToolTipText=$warning[0] }
-            if (-not $item.ToolTipText.Contains($previewNote)) { $item.ToolTipText += $previewNote }
-        }
+        if ($script:Items -and $script:Items.ContainsKey($key) -and $script:Items[$key].Selected) { Update-FileDetails }
     }
 })
 $thumbnailLogTimer.Start()
@@ -248,7 +243,14 @@ function Update-FileDetails {
     $reason=$script:LastFileErrors[$key]
     if (-not $reason) { $reason=$script:LastFileWarnings[$key] }
     $ui.DetailTitle.Text=$item.Text+'  ·  '+$item.SubItems[2].Text
-    $ui.DetailBody.Text=[string]$item.Tag+$(if ($reason) { "`r`n"+$reason } else { '' })
+    $explanation=''
+    if ((Get-ItemState $item) -eq 'unreadable') {
+        $explanation="文件读取或标签校验未通过，已停止写入；这不代表缩略图加载失败，也不能仅据此认定图片损坏。"
+    }
+    if ($list.GetThumbnailState([string]$item.Tag) -eq 'failed') {
+        $explanation += $(if ($explanation) { "`r`n" } else { '' })+'缩略图暂不可用，预览与标签检查分别处理；预览原因已记入日志。'
+    }
+    $ui.DetailBody.Text=[string]$item.Tag+$(if ($explanation) { "`r`n"+$explanation } else { '' })+$(if ($reason) { "`r`n技术信息："+$reason } else { '' })
     $ui.CopyDetails.Enabled=$true
 }
 
@@ -528,7 +530,7 @@ function Run-Action([string]$action) {
             $c = @{ tagged=0; untagged=0; duplicate=0; unreadable=0 }
             foreach ($f in $files) { $c[$states[$f]]++; Set-ItemStatus $f $states[$f] }
             $bar.Value = $bar.Maximum
-            $lblStatus.Text = "体检完成 — 已打标签 $($c.tagged)，未打标签 $($c.untagged)，重复 $($c.duplicate)，读取失败 $($c.unreadable)。可点「开始添加标签」补齐/去重，或导出问题清单。"
+            $lblStatus.Text = "体检完成 — 已打标签 $($c.tagged)，未打标签 $($c.untagged)，重复 $($c.duplicate)，文件检查异常 $($c.unreadable)。可点「开始添加标签」补齐/去重，或导出问题清单。"
         }
         elseif ($action -eq 'add') {
             $counts = @{}
